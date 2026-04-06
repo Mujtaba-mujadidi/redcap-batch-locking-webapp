@@ -1,0 +1,36 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Python
+backend/.venv/
+.venv/
+__pycache__/
+*.py[cod]
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.eggs/
+*.egg-info/
+
+# Frontend
+node_modules/
+.next/
+out/
+dist/
+
+# Logs / runtime
+*.log
+tmp/
+storage/
+uploads/
+reports/

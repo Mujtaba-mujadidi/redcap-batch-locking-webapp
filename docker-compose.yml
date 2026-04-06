@@ -1,0 +1,10 @@
+# Phase A: API only. Add postgres, redis, worker in a later phase.
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
