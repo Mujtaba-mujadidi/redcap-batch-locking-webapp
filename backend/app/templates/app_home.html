@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="dashboard-shell app-shell">
+    {% include "partials/sidebar.html" %}
+
+    <main class="dashboard-main">
+      <div class="content-column">
+        <header class="topbar">
+          <div>
+            <h1 class="topbar-title">REDCap Batch Locking</h1>
+            <p class="topbar-subtitle">Dashboard</p>
+          </div>
+        </header>
+
+        <section class="page-header">
+          <div>
+            <h2 class="section-title">Operations Dashboard</h2>
+            <p class="section-subtitle">
+              Live overview of access, readiness, and the authenticated foundation for the batch locking platform.
+            </p>
+          </div>
+          <button id="refresh-button" class="header-action" type="button">Refresh</button>
+        </section>
+
+        <div class="tab-row">
+          <button class="tab-chip is-active" type="button">Overview</button>
+          <button class="tab-chip" type="button" disabled>Session Details</button>
+        </div>
+
+        <section class="stats-grid stats-grid-wide">
+          <article class="stat-card">
+            <span class="stat-label">Users</span>
+            <strong class="stat-value">{{ dashboard_stats.users }}</strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Super Admins</span>
+            <strong class="stat-value">{{ dashboard_stats.super_admins }}</strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Active Sessions</span>
+            <strong class="stat-value">{{ dashboard_stats.active_sessions }}</strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Jobs</span>
+            <strong class="stat-value">{{ dashboard_stats.jobs }}</strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Reports</span>
+            <strong class="stat-value">{{ dashboard_stats.reports }}</strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Mappings</span>
+            <strong class="stat-value">{{ dashboard_stats.mappings }}</strong>
+          </article>
+        </section>
+
+        <section class="dashboard-panels">
+          <article class="panel-card chart-panel">
+            <div class="panel-card-header">
+              <div>
+                <p class="mini-label">Workspace Readiness</p>
+                <h3>Authentication foundation</h3>
+              </div>
+            </div>
+
+            <div class="bar-strip">
+              <div class="bar-item"><span></span><small>Sessions</small></div>
+              <div class="bar-item"><span></span><small>Users</small></div>
+              <div class="bar-item"><span></span><small>Roles</small></div>
+              <div class="bar-item"><span></span><small>Audit</small></div>
+              <div class="bar-item"><span></span><small>Reports</small></div>
+              <div class="bar-item"><span></span><small>Jobs</small></div>
+              <div class="bar-item"><span></span><small>Mappings</small></div>
+            </div>
+
+            <p class="panel-footer-copy">
+              Authentication, session storage, audit logging, and the first protected workspace are now active.
+            </p>
+          </article>
+
+          <article class="panel-card line-panel">
+            <div class="panel-card-header">
+              <div>
+                <p class="mini-label">Current Account</p>
+                <h3>Signed-in user profile</h3>
+              </div>
+            </div>
+
+            <dl class="detail-list">
+              <div>
+                <dt>Name</dt>
+                <dd>{{ user.full_name or "Not provided" }}</dd>
+              </div>
+              <div>
+                <dt>Email</dt>
+                <dd>{{ user.email }}</dd>
+              </div>
+              <div>
+                <dt>Role</dt>
+                <dd>{{ user.role.value }}</dd>
+              </div>
+              <div>
+                <dt>Session Expires</dt>
+                <dd>{{ session.expires_at }}</dd>
+              </div>
+            </dl>
+          </article>
+        </section>
+
+        <section class="dashboard-panels dashboard-panels-bottom">
+          <article class="panel-card compact-panel">
+            <div class="panel-card-header">
+              <div>
+                <p class="mini-label">Audit</p>
+                <h3>Recorded events</h3>
+              </div>
+            </div>
+            <p class="compact-value">{{ dashboard_stats.audit_events }}</p>
+            <p class="compact-copy">Audit entries already captured for authentication and account activity.</p>
+          </article>
+
+          <article class="panel-card compact-panel">
+            <div class="panel-card-header">
+              <div>
+                <p class="mini-label">Next Build</p>
+                <h3>What comes next</h3>
+              </div>
+            </div>
+            <p class="compact-copy">
+              The next UI slices can follow this same layout for job upload, mapping review, reporting, and deeper admin controls.
+            </p>
+          </article>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const logoutButton = document.getElementById("logout-button");
+    const refreshButton = document.getElementById("refresh-button");
+
+    logoutButton.addEventListener("click", async () => {
+      logoutButton.disabled = true;
+      logoutButton.textContent = "Signing out...";
+
+      try {
+        await fetch("/api/v1/auth/logout", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+      } finally {
+        window.location.assign("/login");
+      }
+    });
+
+    refreshButton.addEventListener("click", () => {
+      window.location.reload();
+    });
+  </script>
+{% endblock %}

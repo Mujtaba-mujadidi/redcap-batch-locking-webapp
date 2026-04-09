@@ -1,0 +1,679 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="dashboard-shell app-shell">
+    {% include "partials/sidebar.html" %}
+
+    <main class="dashboard-main workspace-main">
+      <div class="content-column">
+        <section class="workspace-hero workspace-hero-actions">
+          <div>
+            <p class="mini-label">User Control</p>
+            <h1 class="section-title">System Users</h1>
+            <p class="section-subtitle">
+              Search users, review access, and manage accounts from a single workspace.
+            </p>
+          </div>
+          <div class="toolbar-actions">
+            <button id="refresh-users-button" class="header-action" type="button">Refresh</button>
+            <button id="open-create-user-modal" class="primary-button primary-button-inline" type="button">Create User</button>
+          </div>
+        </section>
+
+        {% if success_message %}
+          <div class="banner banner-success">{{ success_message }}</div>
+        {% endif %}
+        {% if error_message %}
+          <div class="banner banner-error">{{ error_message }}</div>
+        {% endif %}
+
+        <section class="panel-card data-table-card">
+          <div class="panel-card-header">
+            <div>
+              <p class="mini-label">User Directory</p>
+              <h3>System users</h3>
+            </div>
+          </div>
+
+          <div class="datatable-controls">
+            <label class="datatable-length">
+              <select id="users-page-size" class="field-select">
+                <option value="10" selected>10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+              <span>entries per page</span>
+            </label>
+
+            <label class="datatable-search">
+              <span>Search:</span>
+              <input id="users-search" type="search" placeholder="Name, email, access, status" />
+            </label>
+          </div>
+
+          <div class="table-shell">
+            <table class="data-table" id="users-table">
+              <thead>
+                <tr>
+                  <th>
+                    <button class="sort-button is-active" type="button" data-sort-key="full_name">
+                      Full Name
+                      <span class="sort-indicator">▲</span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="email">
+                      Email
+                      <span class="sort-indicator">↕</span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="role">
+                      Access
+                      <span class="sort-indicator">↕</span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="status">
+                      Status
+                      <span class="sort-indicator">↕</span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="last_login">
+                      Last Login
+                      <span class="sort-indicator">↕</span>
+                    </button>
+                  </th>
+                  <th class="actions-column">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body">
+                {% for row in user_rows %}
+                  {% set access_label = "Standard" if row.user.role == Role.USER else "Admin" if row.user.role == Role.ADMIN else "Super Admin" %}
+                  {% set display_name = row.user.full_name or "No name set" %}
+                  {% set last_login_display = row.user.last_login_at.strftime("%d %b %Y %H:%M") if row.user.last_login_at else "Never" %}
+                  <tr
+                    data-user-row
+                    data-full-name="{{ display_name }}"
+                    data-email="{{ row.user.email }}"
+                    data-role="{{ row.user.role.value }}"
+                    data-access-label="{{ access_label }}"
+                    data-status="{{ 'Active' if row.user.is_active else 'Inactive' }}"
+                    data-last-login="{{ last_login_display }}"
+                    data-last-login-sort="{{ row.user.last_login_at.isoformat() if row.user.last_login_at else '' }}"
+                  >
+                    <td>
+                      <strong>{{ display_name }}</strong>
+                    </td>
+                    <td>{{ row.user.email }}</td>
+                    <td>{{ access_label }}</td>
+                    <td>
+                      <span class="status-pill {% if row.user.is_active %}status-active{% else %}status-inactive{% endif %}">
+                        {% if row.user.is_active %}Active{% else %}Inactive{% endif %}
+                      </span>
+                    </td>
+                    <td>{{ last_login_display }}</td>
+                    <td class="actions-column">
+                      <button
+                        type="button"
+                        class="manage-button"
+                        data-manage-user
+                        data-user-id="{{ row.user.id }}"
+                        data-full-name="{{ row.user.full_name or '' }}"
+                        data-email="{{ row.user.email }}"
+                        data-role="{{ row.user.role.value }}"
+                        data-access-label="{{ access_label }}"
+                        data-is-active="{{ 'true' if row.user.is_active else 'false' }}"
+                        data-can-manage="{{ 'true' if row.can_manage else 'false' }}"
+                        data-can-change-role="{{ 'true' if row.can_change_role else 'false' }}"
+                      >
+                        Manage
+                      </button>
+                    </td>
+                  </tr>
+                {% endfor %}
+                <tr id="users-empty-row" hidden>
+                  <td colspan="6" class="empty-state">No users match your current search.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="datatable-footer">
+            <p id="users-table-summary" class="datatable-summary"></p>
+            <div class="datatable-pagination">
+              <button id="users-prev-page" class="page-button" type="button">Previous</button>
+              <span id="users-page-indicator" class="page-indicator"></span>
+              <button id="users-next-page" class="page-button" type="button">Next</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-card support-note-card">
+          <div class="panel-card-header">
+            <div>
+              <p class="mini-label">Permissions</p>
+              <h3>Management rules</h3>
+            </div>
+          </div>
+
+          <div class="info-stack">
+            <div class="info-row">
+              <span class="info-dot"></span>
+              <div>
+                <strong>Admins manage standard users</strong>
+                <p>Admin accounts can create, edit, disable, and reset passwords for standard users only.</p>
+              </div>
+            </div>
+            <div class="info-row">
+              <span class="info-dot"></span>
+              <div>
+                <strong>Super admins can also manage admins</strong>
+                <p>Admin and standard user roles can be changed here, while super admin accounts stay bootstrap-managed.</p>
+              </div>
+            </div>
+            <div class="info-row">
+              <span class="info-dot"></span>
+              <div>
+                <strong>Password resets revoke active sessions</strong>
+                <p>Any password reset or deactivation immediately invalidates the target user’s active sessions.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="create-user-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-user-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="mini-label">Create Account</p>
+          <h3 id="create-user-modal-title">Create a new user</h3>
+        </div>
+        <button type="button" class="modal-close" data-close-modal="create-user-modal" aria-label="Close">×</button>
+      </div>
+
+      <form id="create-user-form" class="modal-body auth-form">
+        <label class="field">
+          <span>Full name</span>
+          <input id="create-user-full-name" name="full_name" type="text" maxlength="255" placeholder="Optional display name" />
+        </label>
+
+        <label class="field">
+          <span>Email</span>
+          <input id="create-user-email" name="email" type="email" maxlength="320" required />
+        </label>
+
+        <label class="field">
+          <span>Temporary password</span>
+          <input id="create-user-password" name="password" type="password" minlength="8" required />
+        </label>
+
+        <label class="field">
+          <span>Role</span>
+          <select id="create-user-role" name="role" class="field-select">
+            {% for allowed_role in allowed_roles %}
+              <option value="{{ allowed_role.value }}">
+                {{ "Standard" if allowed_role == Role.USER else "Admin" if allowed_role == Role.ADMIN else allowed_role.value.replace("_", " ")|title }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <p id="create-user-error" class="error-message" hidden></p>
+
+        <div class="modal-actions">
+          <button type="button" class="header-action" data-close-modal="create-user-modal">Cancel</button>
+          <button id="create-user-submit" type="submit" class="primary-button primary-button-inline">Create User</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="manage-user-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="manage-user-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="mini-label">Manage User</p>
+          <h3 id="manage-user-modal-title">Edit user details</h3>
+        </div>
+        <button type="button" class="modal-close" data-close-modal="manage-user-modal" aria-label="Close">×</button>
+      </div>
+
+      <form id="manage-user-form" class="modal-body auth-form">
+        <input id="manage-user-id" type="hidden" />
+
+        <label class="field">
+          <span>Full name</span>
+          <input id="manage-user-full-name" name="full_name" type="text" maxlength="255" />
+        </label>
+
+        <label class="field">
+          <span>Email</span>
+          <input id="manage-user-email" name="email" type="email" maxlength="320" required />
+        </label>
+
+        <label class="field">
+          <span>Access</span>
+          <select id="manage-user-role" name="role" class="field-select">
+            <option value="user">Standard</option>
+            <option value="admin">Admin</option>
+            <option value="super_admin">Super Admin</option>
+          </select>
+          <small id="manage-role-hint" class="field-hint" hidden>Only super admins can change access levels.</small>
+        </label>
+
+        <label class="field">
+          <span>Status</span>
+          <select id="manage-user-status" name="status" class="field-select">
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>New temporary password</span>
+          <input
+            id="manage-user-password"
+            name="password"
+            type="password"
+            minlength="8"
+            placeholder="Leave blank to keep current password"
+          />
+        </label>
+
+        <div id="manage-user-readonly-note" class="modal-note" hidden>
+          This account is view-only here and must be managed outside the web UI.
+        </div>
+
+        <p id="manage-user-error" class="error-message" hidden></p>
+
+        <div class="modal-actions">
+          <button type="button" class="header-action" data-close-modal="manage-user-modal">Cancel</button>
+          <button id="manage-user-submit" type="submit" class="primary-button primary-button-inline">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const logoutButton = document.getElementById("logout-button");
+    const refreshUsersButton = document.getElementById("refresh-users-button");
+    const openCreateUserModalButton = document.getElementById("open-create-user-modal");
+
+    const createUserModal = document.getElementById("create-user-modal");
+    const createUserForm = document.getElementById("create-user-form");
+    const createUserError = document.getElementById("create-user-error");
+    const createUserSubmit = document.getElementById("create-user-submit");
+
+    const manageUserModal = document.getElementById("manage-user-modal");
+    const manageUserForm = document.getElementById("manage-user-form");
+    const manageUserId = document.getElementById("manage-user-id");
+    const manageUserTitle = document.getElementById("manage-user-modal-title");
+    const manageUserFullName = document.getElementById("manage-user-full-name");
+    const manageUserEmail = document.getElementById("manage-user-email");
+    const manageUserRole = document.getElementById("manage-user-role");
+    const manageSuperAdminOption = manageUserRole.querySelector('option[value="super_admin"]');
+    const manageUserStatus = document.getElementById("manage-user-status");
+    const manageUserPassword = document.getElementById("manage-user-password");
+    const manageUserError = document.getElementById("manage-user-error");
+    const manageRoleHint = document.getElementById("manage-role-hint");
+    const manageReadonlyNote = document.getElementById("manage-user-readonly-note");
+    const manageUserSubmit = document.getElementById("manage-user-submit");
+
+    const usersSearch = document.getElementById("users-search");
+    const usersPageSize = document.getElementById("users-page-size");
+    const usersPrevPage = document.getElementById("users-prev-page");
+    const usersNextPage = document.getElementById("users-next-page");
+    const usersPageIndicator = document.getElementById("users-page-indicator");
+    const usersTableSummary = document.getElementById("users-table-summary");
+    const usersTableRows = Array.from(document.querySelectorAll("[data-user-row]"));
+    const usersEmptyRow = document.getElementById("users-empty-row");
+    const sortButtons = Array.from(document.querySelectorAll("[data-sort-key]"));
+    const manageButtons = Array.from(document.querySelectorAll("[data-manage-user]"));
+    const modalCloseButtons = Array.from(document.querySelectorAll("[data-close-modal]"));
+
+    let currentPage = 1;
+    let currentSortKey = "full_name";
+    let currentSortDirection = "asc";
+    const sortCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+    function openModal(modal) {
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(modal) {
+      modal.hidden = true;
+      if (createUserModal.hidden && manageUserModal.hidden) {
+        document.body.classList.remove("modal-open");
+      }
+    }
+
+    function showError(element, message) {
+      element.textContent = message;
+      element.hidden = false;
+    }
+
+    function clearError(element) {
+      element.hidden = true;
+      element.textContent = "";
+    }
+
+    function parseApiError(response, fallbackMessage) {
+      return response
+        .json()
+        .then((data) => (typeof data.detail === "string" && data.detail ? data.detail : fallbackMessage))
+        .catch(() => fallbackMessage);
+    }
+
+    function getRowValue(row, key) {
+      switch (key) {
+        case "full_name":
+          return row.dataset.fullName || "";
+        case "email":
+          return row.dataset.email || "";
+        case "role":
+          return row.dataset.accessLabel || "";
+        case "status":
+          return row.dataset.status || "";
+        case "last_login":
+          return row.dataset.lastLoginSort || "";
+        default:
+          return "";
+      }
+    }
+
+    function renderSortButtons() {
+      sortButtons.forEach((button) => {
+        const isActive = button.dataset.sortKey === currentSortKey;
+        button.classList.toggle("is-active", isActive);
+        const indicator = button.querySelector(".sort-indicator");
+        if (!indicator) {
+          return;
+        }
+        if (!isActive) {
+          indicator.textContent = "↕";
+          return;
+        }
+        indicator.textContent = currentSortDirection === "asc" ? "▲" : "▼";
+      });
+    }
+
+    function renderUsersTable() {
+      const searchTerm = usersSearch.value.trim().toLowerCase();
+      const pageSize = Number.parseInt(usersPageSize.value, 10);
+
+      const filteredRows = usersTableRows.filter((row) => {
+        if (!searchTerm) {
+          return true;
+        }
+        const haystack = [
+          row.dataset.fullName,
+          row.dataset.email,
+          row.dataset.accessLabel,
+          row.dataset.status,
+          row.dataset.lastLogin,
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(searchTerm);
+      });
+
+      const sortedRows = filteredRows.sort((left, right) => {
+        const leftValue = getRowValue(left, currentSortKey);
+        const rightValue = getRowValue(right, currentSortKey);
+        const comparison = sortCollator.compare(leftValue, rightValue);
+        return currentSortDirection === "asc" ? comparison : -comparison;
+      });
+
+      const totalEntries = sortedRows.length;
+      const totalPages = Math.max(1, Math.ceil(totalEntries / pageSize));
+      currentPage = Math.min(currentPage, totalPages);
+      currentPage = Math.max(1, currentPage);
+
+      const startIndex = totalEntries === 0 ? 0 : (currentPage - 1) * pageSize;
+      const endIndex = totalEntries === 0 ? 0 : Math.min(startIndex + pageSize, totalEntries);
+      const visibleRows = new Set(sortedRows.slice(startIndex, endIndex));
+
+      usersTableRows.forEach((row) => {
+        row.hidden = !visibleRows.has(row);
+      });
+
+      usersEmptyRow.hidden = totalEntries !== 0;
+      usersTableSummary.textContent =
+        totalEntries === 0
+          ? "Showing 0 to 0 of 0 entries"
+          : `Showing ${startIndex + 1} to ${endIndex} of ${totalEntries} entries`;
+      usersPageIndicator.textContent = `Page ${currentPage} of ${totalPages}`;
+      usersPrevPage.disabled = currentPage <= 1;
+      usersNextPage.disabled = currentPage >= totalPages;
+
+      renderSortButtons();
+    }
+
+    function resetCreateUserForm() {
+      createUserForm.reset();
+      clearError(createUserError);
+      createUserSubmit.disabled = false;
+      createUserSubmit.textContent = "Create User";
+    }
+
+    function openManageModal(button) {
+      const canManage = button.dataset.canManage === "true";
+      const canChangeRole = button.dataset.canChangeRole === "true";
+      const fullName = button.dataset.fullName || "";
+      const email = button.dataset.email || "";
+      const accessLabel = button.dataset.accessLabel || "User";
+
+      manageUserId.value = button.dataset.userId;
+      manageUserTitle.textContent = `Manage ${fullName || email}`;
+      manageUserFullName.value = fullName;
+      manageUserEmail.value = email;
+      manageUserRole.value = button.dataset.role;
+      manageUserStatus.value = button.dataset.isActive === "true" ? "active" : "inactive";
+      manageUserPassword.value = "";
+      clearError(manageUserError);
+
+      manageSuperAdminOption.hidden = canManage;
+      manageSuperAdminOption.disabled = canManage;
+      if (button.dataset.role === "super_admin") {
+        manageSuperAdminOption.hidden = false;
+        manageSuperAdminOption.disabled = false;
+      }
+
+      manageUserFullName.disabled = !canManage;
+      manageUserEmail.disabled = !canManage;
+      manageUserStatus.disabled = !canManage;
+      manageUserPassword.disabled = !canManage;
+      manageUserRole.disabled = !canManage || !canChangeRole;
+      manageRoleHint.hidden = canChangeRole || !canManage;
+      manageReadonlyNote.hidden = canManage;
+      manageUserSubmit.hidden = !canManage;
+      manageUserSubmit.disabled = false;
+      manageUserSubmit.textContent = "Save Changes";
+
+      if (!canManage) {
+        manageReadonlyNote.textContent = `${accessLabel} accounts are managed outside this web UI.`;
+      }
+
+      openModal(manageUserModal);
+    }
+
+    logoutButton.addEventListener("click", async () => {
+      logoutButton.disabled = true;
+      logoutButton.textContent = "Signing out...";
+
+      try {
+        await fetch("/api/v1/auth/logout", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+      } finally {
+        window.location.assign("/login");
+      }
+    });
+
+    refreshUsersButton.addEventListener("click", () => {
+      window.location.reload();
+    });
+
+    openCreateUserModalButton.addEventListener("click", () => {
+      resetCreateUserForm();
+      openModal(createUserModal);
+    });
+
+    modalCloseButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const modal = document.getElementById(button.dataset.closeModal);
+        closeModal(modal);
+      });
+    });
+
+    [createUserModal, manageUserModal].forEach((modal) => {
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) {
+          closeModal(modal);
+        }
+      });
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      if (!manageUserModal.hidden) {
+        closeModal(manageUserModal);
+      }
+
+      if (!createUserModal.hidden) {
+        closeModal(createUserModal);
+      }
+    });
+
+    createUserForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearError(createUserError);
+      createUserSubmit.disabled = true;
+      createUserSubmit.textContent = "Creating...";
+
+      const payload = {
+        full_name: document.getElementById("create-user-full-name").value.trim() || null,
+        email: document.getElementById("create-user-email").value.trim(),
+        password: document.getElementById("create-user-password").value,
+        role: document.getElementById("create-user-role").value,
+      };
+
+      try {
+        const response = await fetch("/api/v1/users", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          showError(createUserError, await parseApiError(response, "Unable to create the user."));
+          return;
+        }
+
+        const data = await response.json();
+        window.location.assign(`/users?success=${encodeURIComponent(`Created account for ${data.email}.`)}`);
+      } catch (error) {
+        showError(createUserError, "Network error while creating the user.");
+      } finally {
+        createUserSubmit.disabled = false;
+        createUserSubmit.textContent = "Create User";
+      }
+    });
+
+    manageButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        openManageModal(button);
+      });
+    });
+
+    manageUserForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearError(manageUserError);
+      manageUserSubmit.disabled = true;
+      manageUserSubmit.textContent = "Saving...";
+
+      const payload = {
+        full_name: manageUserFullName.value.trim() || null,
+        email: manageUserEmail.value.trim(),
+        is_active: manageUserStatus.value === "active",
+      };
+
+      if (!manageUserRole.disabled) {
+        payload.role = manageUserRole.value;
+      }
+
+      if (manageUserPassword.value.trim()) {
+        payload.password = manageUserPassword.value;
+      }
+
+      try {
+        const response = await fetch(`/api/v1/users/${manageUserId.value}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          showError(manageUserError, await parseApiError(response, "Unable to update the user."));
+          return;
+        }
+
+        const data = await response.json();
+        window.location.assign(`/users?success=${encodeURIComponent(`Updated ${data.email}.`)}`);
+      } catch (error) {
+        showError(manageUserError, "Network error while updating the user.");
+      } finally {
+        manageUserSubmit.disabled = false;
+        manageUserSubmit.textContent = "Save Changes";
+      }
+    });
+
+    sortButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const nextSortKey = button.dataset.sortKey;
+        if (currentSortKey === nextSortKey) {
+          currentSortDirection = currentSortDirection === "asc" ? "desc" : "asc";
+        } else {
+          currentSortKey = nextSortKey;
+          currentSortDirection = "asc";
+        }
+        currentPage = 1;
+        renderUsersTable();
+      });
+    });
+
+    usersSearch.addEventListener("input", () => {
+      currentPage = 1;
+      renderUsersTable();
+    });
+
+    usersPageSize.addEventListener("change", () => {
+      currentPage = 1;
+      renderUsersTable();
+    });
+
+    usersPrevPage.addEventListener("click", () => {
+      currentPage -= 1;
+      renderUsersTable();
+    });
+
+    usersNextPage.addEventListener("click", () => {
+      currentPage += 1;
+      renderUsersTable();
+    });
+
+    renderUsersTable();
+  </script>
+{% endblock %}

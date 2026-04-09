@@ -12,6 +12,7 @@ Living architecture and delivery plan for this repository. Update this file as d
 
 - **Hosting** (confirmed): On your own server (Linux VM(s) or bare metal) with Docker/Compose; no reliance on managed cloud services.
 - **REDCap tokens** (confirmed): **Never stored**; token is supplied per job and only kept in-memory for job execution.
+- **REDCap API URL**: The REDCap API/base URL may be stored for host-level throttling, job auditability, and project history.
 - **Users**: Created only by Admin/Super Admin; no public sign-up.
 - **Projects**: Multiple REDCap projects over time; the system must key mappings to a stable project identifier (see below).
 - **Project identifier**: Since tokens aren’t stored, we will identify a “project” by calling REDCap `exportProjectInfo` (or equivalent) at job preflight and storing **project_id** (and optionally project title) returned by REDCap.
@@ -19,9 +20,12 @@ Living architecture and delivery plan for this repository. Update this file as d
 - **Compliance**: Data may be sensitive; design assumes least-privilege, encryption at rest, and strong audit logging.
 - **Project root** (confirmed): All code, Docker, and docs for this product live in **this repository** (e.g. `/Users/mujtaba/Documents/Oxford University/Development 2026/REDCap Batch Looking Webapp` on the author’s machine). Treat the repo root as canonical.
 
-### One remaining detail we will derive during build (no extra questions)
+### Query export findings from sample file
 
-- **Unresolved queries file format(s)**: We’ll support at least the export format used by your desktop tool; we’ll implement a parser adapter layer so other formats can be added without rewriting the engine.
+- **Unresolved queries input format** (confirmed from sample): v1 will support the REDCap Data Resolution Dashboard export as **CSV**.
+- **CSV parsing rule**: Parse query files with a standards-compliant CSV parser that respects quoted cells, embedded commas, and CRLF line endings. Do **not** parse by splitting on commas.
+- **Field column rule**: In the query export `Field` column, the **first token** is the REDCap **field name / variable name** and the remaining text is the human-readable **field label**. Matching to REDCap metadata must use the extracted field name, not the label text.
+- **Extensibility**: Keep the unresolved-queries parser behind an adapter interface so additional CSV variants or future XLSX exports can be added without changing the locking engine.
 
 ## Phase 2 — Technical architecture (opinionated)
 
@@ -77,7 +81,8 @@ Living architecture and delivery plan for this repository. Update this file as d
 
 ### File storage design
 
-- Store uploaded request CSV + optional queries file as immutable blobs.
+- Do **not** persist uploaded request CSV or optional queries file after parsing/import unless a future compliance or debugging requirement explicitly needs it.
+- Persist the normalized job rows and execution results in the database instead of keeping raw input files.
 - Generate report artifacts (CSV; later XLSX) and store them with retention policies.
 - Store only what’s needed; avoid storing raw REDCap payloads.
 
@@ -93,6 +98,8 @@ Living architecture and delivery plan for this repository. Update this file as d
 
 ## Phase 3 — PRD (what we will write)
 
+Deliverable: `docs/PRD.md`
+
 - Goals, non-goals
 - Personas/roles
 - Workflows (job creation wizard, mapping confirmation, execution monitoring, report download, admin management)
@@ -102,15 +109,16 @@ Living architecture and delivery plan for this repository. Update this file as d
 
 ## Phase 4 — Data model (what we will design)
 
+Deliverables: `backend/app/models/`, `backend/alembic/`, `backend/alembic/versions/20260406_0001_phase_4_core_schema.py`
+
 We will define tables and key indexes for:
 
 - `users`, `roles`, `permissions` (or role enum + join tables)
-- `redcap_hosts` (per-host throttling settings)
-- `jobs` (owner, status, thresholds, options)
+- `redcap_hosts` (canonical REDCap API/base URL per host + per-host throttling settings)
+- `jobs` (owner, status, thresholds, options, REDCap API URL/host reference, project metadata)
 - `job_rows` (input row + normalized fields)
 - `row_results` (status, message, timings, retries)
 - `instrument_mappings` (project_id + instrument scoped; status var/date var; coded values; last validated; drift detection)
-- `uploads` (request CSV, queries file)
 - `reports` (artifact metadata)
 - `audit_events` (actor, action, object, metadata, IP/user-agent)
 - `job_events` (status changes, rate-limit waits, retries)
@@ -166,6 +174,10 @@ Screens:
   - Validate instrument names, required columns, allowed actions
   - REDCap connectivity test (token + url)
   - Fetch metadata/codebook
+  - If unresolved queries file supplied:
+    - parse with a real CSV parser that preserves quoted commas and multiline text
+    - extract REDCap field name from the `Field` column using the first token only
+    - normalize query status and record/instance identifiers for later row checks
   - Detect for each instrument:
     - form complete field
     - candidate CRF status fields
@@ -181,7 +193,11 @@ Screens:
   - if locked: ignored
   - else check form complete
   - if not complete: ignored
-  - else optional unresolved query check (configurable rule)
+  - else optional unresolved query check (configurable rule):
+    - find queries for the same record / event / instance context
+    - treat any query whose status is not `CLOSED` as unresolved
+    - map query field names to REDCap forms via metadata
+    - if any unresolved query belongs to the form being locked, block locking for that row
   - write CRF status + lock date in correct REDCap formats (based on metadata)
   - call lock endpoint
   - persist row result
@@ -253,10 +269,10 @@ flowchart TD
 
 | Item | Status |
 |------|--------|
-| PRD (Phase 3) full write-up | Pending |
+| PRD (Phase 3) full write-up | Completed |
 | Architecture finalized (Phase 2) | In progress |
-| Data model DDL + Alembic (Phase 4) | Pending |
-| OpenAPI / REST contract (Phase 5) | Pending |
+| Data model DDL + Alembic (Phase 4) | Completed |
+| OpenAPI / REST contract (Phase 5) | In progress |
 | Engine spec + detection scoring (Phase 7) | Pending |
 | Security runbook (Phase 8) | Pending |
 | MVP vs v1 scope sign-off (Phase 10) | Pending |

@@ -1,10 +1,27 @@
-# Phase A: API only. Add postgres, redis, worker in a later phase.
+# Phase 4: API + Postgres. Redis, workers, and frontend come in later phases.
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: redcap_batch_locking
+      POSTGRES_USER: redcap_app
+      POSTGRES_PASSWORD: redcap_app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   api:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    depends_on:
+      - postgres
     ports:
       - "8000:8000"
     environment:
       PYTHONUNBUFFERED: "1"
+      DATABASE_URL: postgresql+psycopg://redcap_app:redcap_app@postgres:5432/redcap_batch_locking
+
+volumes:
+  postgres_data:
