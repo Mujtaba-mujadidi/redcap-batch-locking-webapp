@@ -17,6 +17,8 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - postgres
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     environment:
