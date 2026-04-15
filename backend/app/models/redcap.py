@@ -17,3 +17,5 @@ class REDCapHost(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
 
     jobs = relationship("Job", back_populates="redcap_host")
+    mappings = relationship("InstrumentMapping", back_populates="redcap_host")
+    api_key_cache_entries = relationship("REDCapApiKeyCache", back_populates="redcap_host", cascade="all, delete-orphan")

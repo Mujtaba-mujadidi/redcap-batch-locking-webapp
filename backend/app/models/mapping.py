@@ -12,10 +12,16 @@ from app.models.types import enum_type
 class InstrumentMapping(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "instrument_mappings"
     __table_args__ = (
-        UniqueConstraint("redcap_project_id", "instrument_name", name="uq_instrument_mappings_project_instrument"),
+        UniqueConstraint(
+            "redcap_host_id",
+            "redcap_project_id",
+            "instrument_name",
+            name="uq_instrument_mappings_host_project_instrument",
+        ),
         Index("ix_instrument_mappings_status", "status"),
     )
 
+    redcap_host_id: Mapped[UUID | None] = mapped_column(ForeignKey("redcap_hosts.id", ondelete="SET NULL"))
     redcap_project_id: Mapped[str] = mapped_column(String(100), nullable=False)
     instrument_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[MappingStatus] = mapped_column(enum_type(MappingStatus, "mapping_status"), nullable=False)
@@ -31,4 +37,5 @@ class InstrumentMapping(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     drift_detected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
+    redcap_host = relationship("REDCapHost", back_populates="mappings")
     confirmed_by_user = relationship("User", back_populates="confirmed_mappings")

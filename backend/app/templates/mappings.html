@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="dashboard-shell app-shell">
+    {% include "partials/sidebar.html" %}
+
+    <main class="dashboard-main workspace-main">
+      <div class="content-column">
+        <section class="workspace-hero workspace-hero-actions">
+          <div>
+            <p class="mini-label">Mapping Review</p>
+            <h1 class="section-title">Review REDCap form mappings</h1>
+            {% if job %}
+              <p class="section-subtitle">
+                {{ job.redcap_project_title or "Untitled project" }}{% if job.redcap_project_id %} · Project {{ job.redcap_project_id }}{% endif %}
+              </p>
+            {% endif %}
+          </div>
+          <div class="toolbar-actions">
+            <a class="header-action" href="/jobs">Back to Jobs</a>
+          </div>
+        </section>
+
+        {% if success_message %}
+          <div class="banner banner-success">{{ success_message }}</div>
+        {% endif %}
+        {% if error_message %}
+          <div class="banner banner-error">{{ error_message }}</div>
+        {% endif %}
+
+        {% if not job %}
+          <section class="panel-card support-note-card">
+            <div class="panel-card-header">
+              <div>
+                <p class="mini-label">Mappings</p>
+                <h3>No job is waiting for review</h3>
+              </div>
+            </div>
+            <p class="compact-copy">
+              Import a request CSV from the Jobs page to fetch REDCap metadata and prepare a mapping review.
+            </p>
+          </section>
+        {% else %}
+          <section class="stats-grid mapping-summary-grid">
+            <article class="stat-card">
+              <span class="stat-label">Job Status</span>
+              <span class="stat-value">{{ job.status.value.replace("_", " ")|title }}</span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">Request Rows</span>
+              <span class="stat-value">{{ job.total_rows }}</span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">Forms To Review</span>
+              <span class="stat-value">{{ mapping_rows|length }}</span>
+            </article>
+          </section>
+
+          {% if mapping_rows %}
+            <form action="/mappings/{{ job.id }}/confirm" method="post" class="auth-form">
+              {% for row in mapping_rows %}
+                <section class="panel-card mapping-review-card">
+                  <div class="panel-card-header">
+                    <div>
+                      <p class="mini-label">{{ row.review.instrument_name }}</p>
+                      <h3>{{ row.review.instrument_label }}</h3>
+                      <p class="compact-copy">
+                        Complete field:
+                        {% if row.review.form_complete_field_name %}
+                          <span class="mono">{{ row.review.form_complete_field_name }}</span>
+                        {% else %}
+                          Not identified automatically
+                        {% endif %}
+                      </p>
+                    </div>
+                    <span class="status-pill {% if row.mapping.confidence.value == 'high' %}status-active{% elif row.mapping.confidence.value == 'confirm' %}status-review{% else %}status-inactive{% endif %}">
+                      {% if row.mapping.confidence.value == 'high' %}
+                        High Confidence
+                      {% elif row.mapping.confidence.value == 'confirm' %}
+                        Needs Review
+                      {% else %}
+                        Not Found
+                      {% endif %}
+                    </span>
+                  </div>
+
+                  {% if row.review.notes %}
+                    <div class="notice-card mapping-note-list">
+                      {% for note in row.review.notes %}
+                        <p>{{ note }}</p>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+
+                  <div class="table-shell">
+                    <table class="data-table mapping-table">
+                      <thead>
+                        <tr>
+                          <th>Mapping</th>
+                          <th>Auto-Detected</th>
+                          <th>Select Field</th>
+                          <th>Manual Field Name</th>
+                          <th>Learn Label Variant</th>
+                          <th>Value / Format</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>
+                            <strong>Form complete field</strong>
+                            <p class="compact-copy">Always uses the REDCap form complete field.</p>
+                          </td>
+                          <td>
+                            <span class="mono">{{ row.review.form_complete_field_name }}</span>
+                          </td>
+                          <td colspan="4" class="mapping-fixed-cell">
+                            <span class="compact-copy">Fixed to <span class="mono">{{ row.review.instrument_name }}_complete</span></span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td><strong>Lock status field</strong></td>
+                          <td>
+                            {% if row.review.selected_status_candidate %}
+                              <span class="mono">{{ row.review.selected_status_candidate.field_name }}</span>
+                              {% if row.review.selected_status_candidate.field_label %}
+                                <p class="compact-copy">{{ row.review.selected_status_candidate.field_label }}</p>
+                              {% endif %}
+                            {% else %}
+                              <span class="compact-copy">None detected automatically</span>
+                            {% endif %}
+                          </td>
+                          <td>
+                            <select name="mapping_{{ row.mapping.id }}_status_field_name" class="field-select mapping-cell-input">
+                              <option value="{{ mapping_none_option }}" {% if row.selected_status_field_name == mapping_none_option %}selected{% endif %}>
+                                No extra status field
+                              </option>
+                              {% for option in row.status_options %}
+                                <option value="{{ option.field_name }}" {% if row.selected_status_field_name == option.field_name %}selected{% endif %}>
+                                  {{ option.field_name }}{% if option.field_label %} — {{ option.field_label }}{% endif %} ({{ option.field_type }})
+                                </option>
+                              {% endfor %}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              name="mapping_{{ row.mapping.id }}_status_manual_field_name"
+                              type="text"
+                              maxlength="255"
+                              value=""
+                              class="mapping-cell-input"
+                            />
+                          </td>
+                          <td>
+                            <input
+                              name="mapping_{{ row.mapping.id }}_status_label_variant"
+                              type="text"
+                              maxlength="255"
+                              value=""
+                              class="mapping-cell-input"
+                            />
+                          </td>
+                          <td>
+                            <input
+                              name="mapping_{{ row.mapping.id }}_status_lock_value"
+                              type="text"
+                              maxlength="100"
+                              value="{{ row.selected_status_lock_value }}"
+                              class="mapping-cell-input"
+                            />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td><strong>Lock date field</strong></td>
+                          <td>
+                            {% if row.review.selected_date_candidate %}
+                              <span class="mono">{{ row.review.selected_date_candidate.field_name }}</span>
+                              {% if row.review.selected_date_candidate.field_label %}
+                                <p class="compact-copy">{{ row.review.selected_date_candidate.field_label }}</p>
+                              {% endif %}
+                            {% else %}
+                              <span class="compact-copy">None detected automatically</span>
+                            {% endif %}
+                          </td>
+                          <td>
+                            <select name="mapping_{{ row.mapping.id }}_date_field_name" class="field-select mapping-cell-input">
+                              <option value="{{ mapping_none_option }}" {% if row.selected_date_field_name == mapping_none_option %}selected{% endif %}>
+                                No extra lock date field
+                              </option>
+                              {% for option in row.date_options %}
+                                <option value="{{ option.field_name }}" {% if row.selected_date_field_name == option.field_name %}selected{% endif %}>
+                                  {{ option.field_name }}{% if option.field_label %} — {{ option.field_label }}{% endif %}
+                                  {% if option.validation_type %} ({{ option.validation_type }}){% endif %}
+                                </option>
+                              {% endfor %}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              name="mapping_{{ row.mapping.id }}_date_manual_field_name"
+                              type="text"
+                              maxlength="255"
+                              value=""
+                              class="mapping-cell-input"
+                            />
+                          </td>
+                          <td>
+                            <input
+                              name="mapping_{{ row.mapping.id }}_date_label_variant"
+                              type="text"
+                              maxlength="255"
+                              value=""
+                              class="mapping-cell-input"
+                            />
+                          </td>
+                          <td>
+                            <select name="mapping_{{ row.mapping.id }}_date_format" class="field-select mapping-cell-input">
+                              <option value="{{ mapping_auto_option }}" {% if row.selected_date_format == mapping_auto_option %}selected{% endif %}>
+                                Auto detect
+                              </option>
+                              {% for option in date_format_options %}
+                                <option value="{{ option }}" {% if row.selected_date_format == option %}selected{% endif %}>
+                                  {{ option }}
+                                </option>
+                              {% endfor %}
+                            </select>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              {% endfor %}
+
+              <div class="mapping-card-footer">
+                <button type="submit" class="primary-button primary-button-inline">Save Mappings</button>
+              </div>
+            </form>
+          {% else %}
+            <section class="panel-card support-note-card">
+              <div class="panel-card-header">
+                <div>
+                  <p class="mini-label">Mappings</p>
+                  <h3>No forms require manual mapping confirmation</h3>
+                </div>
+              </div>
+              <p class="compact-copy">
+                The app found one clear status/date-field match for each requested form, so this job does not need manual mapping review.
+              </p>
+            </section>
+          {% endif %}
+        {% endif %}
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const logoutButton = document.getElementById("logout-button");
+
+    logoutButton.addEventListener("click", async () => {
+      logoutButton.disabled = true;
+      logoutButton.textContent = "Signing out...";
+
+      try {
+        await fetch("/api/v1/auth/logout", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+      } finally {
+        window.location.assign("/login");
+      }
+    });
+  </script>
+{% endblock %}

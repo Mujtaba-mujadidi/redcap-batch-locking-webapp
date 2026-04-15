@@ -1,0 +1,629 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="dashboard-shell app-shell">
+    {% include "partials/sidebar.html" %}
+
+    <main class="dashboard-main workspace-main">
+      <div class="content-column">
+        <section class="workspace-hero workspace-hero-actions">
+          <div>
+            <h1 class="section-title">Jobs</h1>
+          </div>
+          <div class="toolbar-actions">
+            <a class="header-action" href="/jobs/template.csv">Export Template</a>
+            <button id="open-import-request-modal" class="primary-button primary-button-inline" type="button">Import File</button>
+          </div>
+        </section>
+
+        {% if success_message %}
+          <div class="banner banner-success">{{ success_message }}</div>
+        {% endif %}
+        {% if error_message %}
+          <div class="banner banner-error">{{ error_message }}</div>
+        {% endif %}
+
+        <section class="panel-card data-table-card">
+          <div class="panel-card-header">
+            <div>
+              <p class="mini-label">Job Queue</p>
+              <h3>Latest {{ recent_jobs_limit }} requests</h3>
+              <p class="compact-copy">Older generated exports now live in the Reports tab.</p>
+            </div>
+          </div>
+
+          {% if job_review_rows %}
+            <div class="table-shell">
+              <table class="data-table jobs-review-table">
+                <thead>
+                  <tr>
+                    <th>Request</th>
+                    <th>Status</th>
+                    <th>Rows</th>
+                    <th>Forms Requiring Review</th>
+                    <th>Updated</th>
+                    <th class="actions-column">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in job_review_rows %}
+                    <tr data-job-row data-job-id="{{ row.job.id }}" data-job-status="{{ row.job.status.value }}">
+                      <td>
+                        <strong>{{ row.job.request_file_name or "Imported request" }}</strong>
+                        <p class="compact-copy">
+                          {{ row.job.redcap_project_title or "Untitled project" }}
+                          {% if row.job.redcap_project_id %} · Project {{ row.job.redcap_project_id }}{% endif %}
+                        </p>
+                        <p class="compact-copy">{{ row.host_label }}</p>
+                        <p class="compact-copy">{{ row.progress.rate_limit_copy }}</p>
+                        <div
+                          class="job-progress-panel"
+                          data-job-progress
+                          {% if not row.progress.visible %}hidden{% endif %}
+                        >
+                          <div class="job-progress-header">
+                            <strong data-progress-summary>{{ row.progress.summary }}</strong>
+                            <span class="compact-copy" data-progress-percent>{{ row.progress.percent }}%</span>
+                          </div>
+                          <div class="job-progress-track" aria-hidden="true">
+                            <div class="job-progress-fill" data-progress-fill style="width: {{ row.progress.percent }}%;"></div>
+                          </div>
+                          <p class="compact-copy" data-progress-message>{{ row.progress.message }}</p>
+                          <p
+                            class="compact-copy job-progress-wait"
+                            data-progress-wait
+                            data-wait-seconds="{{ row.progress.wait_seconds_remaining if row.progress.wait_seconds_remaining is not none else '' }}"
+                            {% if not row.progress.wait_message %}hidden{% endif %}
+                          >
+                            {{ row.progress.wait_message }}
+                          </p>
+                          <p class="compact-copy" data-progress-detail {% if not row.progress.detail %}hidden{% endif %}>{{ row.progress.detail }}</p>
+                        </div>
+                      </td>
+                      <td>
+                        <span class="status-pill {{ row.status_tone }}" data-job-status-pill>{{ row.status_label }}</span>
+                      </td>
+                      <td>{{ row.job.total_rows }}</td>
+                      <td>
+                        {% if row.review_count %}
+                          {{ row.review_count }} form{{ "s" if row.review_count != 1 else "" }}
+                        {% else %}
+                          <span class="compact-copy">None</span>
+                        {% endif %}
+                      </td>
+                      <td data-job-updated>{{ row.job.updated_at.strftime("%d %b %Y %H:%M") }}</td>
+                      <td class="actions-column">
+                        {% if row.report_href and (row.action_kind == "process" or row.action_kind == "process_cached") %}
+                          <details class="job-action-menu">
+                            <summary class="manage-button">Actions</summary>
+                            <div class="job-action-menu-list">
+                              {% if row.action_kind == "process_cached" %}
+                                <form
+                                  action="/jobs/{{ row.job.id }}/process"
+                                  method="post"
+                                  class="job-action-menu-form"
+                                >
+                                  <button type="submit" class="job-action-menu-button">{{ row.action_label }}</button>
+                                </form>
+                              {% else %}
+                                <button
+                                  type="button"
+                                  class="job-action-menu-button"
+                                  data-open-process-modal
+                                  data-job-id="{{ row.job.id }}"
+                                  data-job-label="{{ row.job.request_file_name or 'Imported request' }}"
+                                >
+                                  {{ row.action_label }}
+                                </button>
+                              {% endif %}
+                              <a class="job-action-menu-link" href="{{ row.report_href }}">Export Report</a>
+                            </div>
+                          </details>
+                          <p class="compact-copy" data-job-action-hint>{{ row.action_hint }}</p>
+                        {% elif row.action_kind == "link" %}
+                          <a class="manage-button" href="{{ row.action_href }}">{{ row.action_label }}</a>
+                          <p class="compact-copy" data-job-action-hint>{{ row.action_hint }}</p>
+                        {% elif row.action_kind == "download" %}
+                          <a class="manage-button" href="{{ row.action_href }}">{{ row.action_label }}</a>
+                          <p class="compact-copy" data-job-action-hint>{{ row.action_hint }}</p>
+                        {% elif row.action_kind == "process_cached" %}
+                          <form
+                            action="/jobs/{{ row.job.id }}/process"
+                            method="post"
+                            class="inline-form"
+                          >
+                            <button type="submit" class="manage-button">{{ row.action_label }}</button>
+                          </form>
+                          <p class="compact-copy" data-job-action-hint>{{ row.action_hint }}</p>
+                        {% elif row.action_kind == "process" %}
+                          <button
+                            type="button"
+                            class="manage-button"
+                            data-open-process-modal
+                            data-job-id="{{ row.job.id }}"
+                            data-job-label="{{ row.job.request_file_name or 'Imported request' }}"
+                          >
+                            {{ row.action_label }}
+                          </button>
+                          <p class="compact-copy" data-job-action-hint>{{ row.action_hint }}</p>
+                        {% else %}
+                          <span class="compact-copy" data-job-action-hint>{{ row.action_hint }}</span>
+                        {% endif %}
+                        {% if row.report_href and row.action_kind != "download" and row.action_kind != "process" and row.action_kind != "process_cached" %}
+                          <p class="compact-copy"><a href="{{ row.report_href }}">Export report</a></p>
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="compact-copy jobs-empty-state">No imported jobs are waiting for mapping review or queued for processing yet.</p>
+          {% endif %}
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <div id="{{ import_modal_id }}" class="modal-backdrop" {% if open_modal != import_modal_id %}hidden{% endif %}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="import-request-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="mini-label">Import Request</p>
+          <h3 id="import-request-modal-title">Import a completed request CSV</h3>
+        </div>
+        <button type="button" class="modal-close" data-close-modal="{{ import_modal_id }}" aria-label="Close">×</button>
+      </div>
+
+      <form
+        action="/jobs/import"
+        method="post"
+        enctype="multipart/form-data"
+        class="modal-body auth-form"
+        data-progress-submit
+        data-progress-title="Running REDCap pre-flight"
+        data-progress-copy="Validating the import package, checking the REDCap project, and preparing any mapping review that is needed."
+        data-progress-mode="live"
+        data-progress-stages="Validating files|Checking REDCap project details|Preparing field mappings|Finalising the import"
+      >
+        <label class="field">
+          <span>API URL</span>
+          <input
+            id="redcap-api-url"
+            name="redcap_api_url"
+            type="url"
+            value=""
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+        </label>
+
+        <label class="field">
+          <span>API Key</span>
+          <input
+            id="redcap-api-key"
+            name="redcap_api_key"
+            type="password"
+            value=""
+            autocomplete="new-password"
+            spellcheck="false"
+            required
+          />
+        </label>
+
+        <label class="field">
+          <span>Request CSV</span>
+          <input id="request-file" name="request_file" type="file" accept=".csv,text/csv" required />
+        </label>
+
+        <label class="field">
+          <span>Existing Queries Export</span>
+          <input id="queries-file" name="queries_file" type="file" accept=".csv,text/csv" />
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" class="header-action" data-close-modal="{{ import_modal_id }}">Cancel</button>
+          <button type="submit" class="primary-button primary-button-inline">Import File</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="{{ process_modal_id }}" class="modal-backdrop" {% if open_modal != process_modal_id %}hidden{% endif %}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="process-job-modal-title">
+      <div class="modal-header">
+        <div>
+          <p class="mini-label">Process Job</p>
+          <h3 id="process-job-modal-title">Start selected request</h3>
+          <p id="process-job-modal-copy" class="compact-copy">
+            {% if selected_process_job %}
+              {{ selected_process_job.job.request_file_name or "Imported request" }}
+            {% else %}
+              Enter the REDCap API key to start background processing.
+            {% endif %}
+          </p>
+        </div>
+        <button type="button" class="modal-close" data-close-modal="{{ process_modal_id }}" aria-label="Close">×</button>
+      </div>
+
+      <form
+        id="process-job-form"
+        action="{% if selected_process_job %}/jobs/{{ selected_process_job.job.id }}/process{% else %}/jobs{% endif %}"
+        method="post"
+        class="modal-body auth-form"
+      >
+        <div class="modal-note">
+          The API key is stored as an encrypted, session-scoped cache for a short time so you do not need to re-enter it on every step. Once started, the job continues in the background and progress appears on the Jobs page.
+        </div>
+
+        <label class="field">
+          <span>API Key</span>
+          <input
+            id="process-redcap-api-key"
+            name="redcap_api_key"
+            type="password"
+            value=""
+            autocomplete="new-password"
+            spellcheck="false"
+            required
+          />
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" class="header-action" data-close-modal="{{ process_modal_id }}">Cancel</button>
+          <button type="submit" class="primary-button primary-button-inline">Start Processing</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="submission-progress-overlay" class="progress-overlay" hidden>
+    <div class="progress-dialog" role="status" aria-live="polite" aria-atomic="true">
+      <p id="submission-progress-mode-label" class="mini-label">Live Processing</p>
+      <h3 id="submission-progress-title">Working on your request</h3>
+      <p id="submission-progress-copy" class="compact-copy">
+        Keep this tab open while the current request is being handled.
+      </p>
+
+      <div class="progress-meter" aria-hidden="true">
+        <div id="submission-progress-fill" class="progress-meter-fill"></div>
+      </div>
+
+      <p id="submission-progress-stage" class="progress-stage-copy">Preparing the next step...</p>
+      <p id="submission-progress-mode-copy" class="compact-copy progress-mode-copy">
+        Mode: Live in this browser session. Background workers are not enabled yet.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const logoutButton = document.getElementById("logout-button");
+    const importRequestModal = document.getElementById("{{ import_modal_id }}");
+    const processJobModal = document.getElementById("{{ process_modal_id }}");
+    const processJobForm = document.getElementById("process-job-form");
+    const processJobCopy = document.getElementById("process-job-modal-copy");
+    const submissionProgressOverlay = document.getElementById("submission-progress-overlay");
+    const submissionProgressModeLabel = document.getElementById("submission-progress-mode-label");
+    const submissionProgressTitle = document.getElementById("submission-progress-title");
+    const submissionProgressCopy = document.getElementById("submission-progress-copy");
+    const submissionProgressFill = document.getElementById("submission-progress-fill");
+    const submissionProgressStage = document.getElementById("submission-progress-stage");
+    const submissionProgressModeCopy = document.getElementById("submission-progress-mode-copy");
+    const openImportButtons = [document.getElementById("open-import-request-modal")].filter(Boolean);
+    const openProcessButtons = Array.from(document.querySelectorAll("[data-open-process-modal]"));
+    const modalCloseButtons = Array.from(document.querySelectorAll("[data-close-modal]"));
+    const progressForms = Array.from(document.querySelectorAll("[data-progress-submit]"));
+    const jobProgressRows = Array.from(document.querySelectorAll("[data-job-row]"));
+    let progressStageTimer = null;
+    let progressFillTimer = null;
+    let progressPollTimer = null;
+
+    logoutButton.addEventListener("click", async () => {
+      logoutButton.disabled = true;
+      logoutButton.textContent = "Signing out...";
+
+      try {
+        await fetch("/api/v1/auth/logout", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+      } finally {
+        window.location.assign("/login");
+      }
+    });
+
+    function openModal(modal) {
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(modal) {
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    openImportButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        openModal(importRequestModal);
+      });
+    });
+
+    openProcessButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        processJobForm.action = `/jobs/${button.dataset.jobId}/process`;
+        processJobCopy.textContent = button.dataset.jobLabel || "Enter the REDCap API key to start execution.";
+        openModal(processJobModal);
+      });
+    });
+
+    function getProgressModeConfig(mode) {
+      if (mode === "background") {
+        return {
+          label: "Background Processing",
+          copy: "Mode: Background. You can leave this page and return to Jobs to pick up the result.",
+        };
+      }
+
+      return {
+        label: "Live Processing",
+        copy: "Mode: Live in this browser session. Keep this tab open until the request finishes.",
+      };
+    }
+
+    function clearProgressTimers() {
+      if (progressStageTimer) {
+        window.clearInterval(progressStageTimer);
+        progressStageTimer = null;
+      }
+      if (progressFillTimer) {
+        window.clearInterval(progressFillTimer);
+        progressFillTimer = null;
+      }
+    }
+
+    function setButtonsBusy(form) {
+      form.querySelectorAll("button").forEach((button) => {
+        button.dataset.wasBusy = "true";
+        button.setAttribute("aria-disabled", "true");
+      });
+    }
+
+    function showSubmissionProgress(form) {
+      const stages = (form.dataset.progressStages || "")
+        .split("|")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const modeConfig = getProgressModeConfig(form.dataset.progressMode || "live");
+      let stageIndex = 0;
+      let progressValue = 12;
+
+      clearProgressTimers();
+
+      submissionProgressModeLabel.textContent = modeConfig.label;
+      submissionProgressTitle.textContent = form.dataset.progressTitle || "Working on your request";
+      submissionProgressCopy.textContent =
+        form.dataset.progressCopy || "Keep this tab open while the current request is being handled.";
+      submissionProgressModeCopy.textContent = modeConfig.copy;
+      submissionProgressStage.textContent = stages[0] || "Preparing request";
+      submissionProgressFill.style.width = `${progressValue}%`;
+      submissionProgressOverlay.hidden = false;
+      document.body.classList.add("modal-open", "progress-open");
+
+      if (stages.length > 1) {
+        progressStageTimer = window.setInterval(() => {
+          if (stageIndex < stages.length - 1) {
+            stageIndex += 1;
+          }
+          submissionProgressStage.textContent = stages[stageIndex];
+        }, 2400);
+      }
+
+      progressFillTimer = window.setInterval(() => {
+        const cap = stageIndex >= Math.max(stages.length - 1, 0) ? 86 : 92;
+        progressValue = Math.min(progressValue + 5, cap);
+        submissionProgressFill.style.width = `${progressValue}%`;
+      }, 700);
+    }
+
+    progressForms.forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        if (form.dataset.submitting === "true") {
+          event.preventDefault();
+          return;
+        }
+
+        form.dataset.submitting = "true";
+        setButtonsBusy(form);
+        showSubmissionProgress(form);
+      });
+    });
+
+    function formatUpdatedAt(isoValue) {
+      if (!isoValue) {
+        return "";
+      }
+      const parsed = new Date(isoValue);
+      if (Number.isNaN(parsed.getTime())) {
+        return isoValue;
+      }
+      return parsed.toLocaleString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+    }
+
+    function renderWaitCountdown(panel) {
+      const waitElement = panel.querySelector("[data-progress-wait]");
+      if (!waitElement || waitElement.hidden) {
+        return;
+      }
+      const waitSeconds = Number(waitElement.dataset.waitSeconds || "0");
+      if (!Number.isFinite(waitSeconds) || waitSeconds <= 0) {
+        waitElement.textContent = "Rate limit reached. Resuming soon.";
+        return;
+      }
+      waitElement.textContent = `Rate limit reached. Resuming in about ${waitSeconds} seconds.`;
+    }
+
+    function applyJobProgress(jobState) {
+      const row = document.querySelector(`[data-job-row][data-job-id="${jobState.job_id}"]`);
+      if (!row) {
+        return;
+      }
+
+      row.dataset.jobStatus = jobState.status;
+      const statusPill = row.querySelector("[data-job-status-pill]");
+      if (statusPill) {
+        statusPill.textContent = jobState.status_label;
+        statusPill.className = `status-pill ${jobState.status_tone}`;
+      }
+
+      const actionHint = row.querySelector("[data-job-action-hint]");
+      if (actionHint) {
+        actionHint.textContent = jobState.action_hint;
+      }
+
+      const updatedCell = row.querySelector("[data-job-updated]");
+      if (updatedCell) {
+        updatedCell.textContent = formatUpdatedAt(jobState.updated_at);
+      }
+
+      const panel = row.querySelector("[data-job-progress]");
+      if (!panel) {
+        return;
+      }
+
+      if (jobState.progress.visible) {
+        panel.hidden = false;
+      } else {
+        panel.hidden = true;
+        return;
+      }
+
+      const summary = panel.querySelector("[data-progress-summary]");
+      const percent = panel.querySelector("[data-progress-percent]");
+      const fill = panel.querySelector("[data-progress-fill]");
+      const message = panel.querySelector("[data-progress-message]");
+      const wait = panel.querySelector("[data-progress-wait]");
+      const detail = panel.querySelector("[data-progress-detail]");
+
+      if (summary) {
+        summary.textContent = jobState.progress.summary;
+      }
+      if (percent) {
+        percent.textContent = `${jobState.progress.percent}%`;
+      }
+      if (fill) {
+        fill.style.width = `${jobState.progress.percent}%`;
+      }
+      if (message) {
+        message.textContent = jobState.progress.message || "";
+      }
+      if (wait) {
+        const hasWait = Boolean(jobState.progress.wait_message);
+        wait.hidden = !hasWait;
+        wait.dataset.waitSeconds = jobState.progress.wait_seconds_remaining ?? "";
+        if (hasWait) {
+          wait.textContent = jobState.progress.wait_message;
+          renderWaitCountdown(panel);
+        }
+      }
+      if (detail) {
+        detail.hidden = !jobState.progress.detail;
+        detail.textContent = jobState.progress.detail || "";
+      }
+    }
+
+    async function pollJobProgress() {
+      try {
+        const response = await fetch("/jobs/progress", {
+          method: "GET",
+          credentials: "same-origin",
+          headers: {
+            "Accept": "application/json",
+          },
+        });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        const activeRowIds = jobProgressRows
+          .filter((row) => ["queued", "running", "waiting_due_to_rate_limit"].includes(row.dataset.jobStatus || ""))
+          .map((row) => row.dataset.jobId);
+        let shouldReload = false;
+
+        (payload.jobs || []).forEach((jobState) => {
+          applyJobProgress(jobState);
+          if (
+            activeRowIds.includes(jobState.job_id) &&
+            !["queued", "running", "waiting_due_to_rate_limit"].includes(jobState.status)
+          ) {
+            shouldReload = true;
+          }
+        });
+
+        if (shouldReload) {
+          window.location.reload();
+          return;
+        }
+
+        if (!(payload.has_active_jobs || false) && progressPollTimer) {
+          window.clearInterval(progressPollTimer);
+          progressPollTimer = null;
+        }
+      } catch (error) {
+        console.error("Could not refresh job progress", error);
+      }
+    }
+
+    modalCloseButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const modal = document.getElementById(button.dataset.closeModal);
+        closeModal(modal);
+      });
+    });
+
+    importRequestModal.addEventListener("click", (event) => {
+      if (event.target === importRequestModal) {
+        closeModal(importRequestModal);
+      }
+    });
+
+    processJobModal.addEventListener("click", (event) => {
+      if (event.target === processJobModal) {
+        closeModal(processJobModal);
+      }
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !importRequestModal.hidden) {
+        closeModal(importRequestModal);
+      }
+      if (event.key === "Escape" && !processJobModal.hidden) {
+        closeModal(processJobModal);
+      }
+    });
+
+    if (!importRequestModal.hidden || !processJobModal.hidden) {
+      document.body.classList.add("modal-open");
+    }
+
+    if (jobProgressRows.some((row) => ["queued", "running", "waiting_due_to_rate_limit"].includes(row.dataset.jobStatus || ""))) {
+      jobProgressRows.forEach((row) => {
+        const panel = row.querySelector("[data-job-progress]");
+        if (panel) {
+          renderWaitCountdown(panel);
+        }
+      });
+      progressPollTimer = window.setInterval(pollJobProgress, 3000);
+    }
+  </script>
+{% endblock %}

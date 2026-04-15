@@ -23,3 +23,8 @@ class UserSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user_agent: Mapped[str | None] = mapped_column(String(512))
 
     user = relationship("User", back_populates="sessions")
+    redcap_api_key_cache_entries = relationship(
+        "REDCapApiKeyCache",
+        back_populates="user_session",
+        cascade="all, delete-orphan",
+    )

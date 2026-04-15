@@ -2,6 +2,31 @@
 
 Living architecture and delivery plan for this repository. Update this file as decisions change.
 
+## Progress snapshot — 15 April 2026
+
+Implemented in the repository right now:
+
+- FastAPI backend with cookie-based auth, DB-backed sessions, and built-in admin/user UI
+- Jobs import flow with:
+  - template export
+  - request CSV validation
+  - REDCap API URL / API key intake
+  - optional existing queries CSV import
+  - REDCap preflight checks and metadata discovery
+- Instrument mapping detection plus manual mapping confirmation UI
+- Background lock/unlock job processing from the Jobs page
+- Project-scoped REDCap API rate limiting with visible wait-state messaging
+- CSV report generation/export for completed, failed, and partial-error jobs
+- Session-scoped encrypted REDCap API key cache for the active authenticated session
+- Jobs page limited to latest requests, with older reports surfaced on Reports
+
+Still intentionally pending / not yet aligned to the target architecture:
+
+- Celery + Redis worker infrastructure
+- True resumable/distributed job execution
+- Next.js frontend replacement for the current Jinja UI
+- Broader automated test coverage
+
 ## Phase 1 — Discovery & explicit assumptions
 
 ### Product summary
@@ -11,7 +36,7 @@ Living architecture and delivery plan for this repository. Update this file as d
 ### Assumptions (clearly labeled)
 
 - **Hosting** (confirmed): On your own server (Linux VM(s) or bare metal) with Docker/Compose; no reliance on managed cloud services.
-- **REDCap tokens** (confirmed): **Never stored**; token is supplied per job and only kept in-memory for job execution.
+- **REDCap tokens / API keys** (updated): Long-term storage is still disallowed. The current implementation temporarily stores the supplied API key in a **session-scoped encrypted cache** so the same authenticated user can process additional jobs in the same session without re-entering it every time.
 - **REDCap API URL**: The REDCap API/base URL may be stored for host-level throttling, job auditability, and project history.
 - **Users**: Created only by Admin/Super Admin; no public sign-up.
 - **Projects**: Multiple REDCap projects over time; the system must key mappings to a stable project identifier (see below).

@@ -11,6 +11,7 @@ from app.models.session import UserSession
 from app.schemas.auth import AuthenticatedResponse, AuthSessionRead, AuthUserRead, LoginRequest, LogoutResponse
 from app.services.audit import record_audit_event
 from app.services.auth import authenticate_user, create_user_session, revoke_session
+from app.services.redcap_api_keys import clear_redcap_api_keys_for_session
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -96,6 +97,7 @@ def logout(
     db: Session = Depends(get_db_session),
     current_session: UserSession = Depends(get_current_session),
 ) -> LogoutResponse:
+    clear_redcap_api_keys_for_session(db, user_session_id=current_session.id)
     revoke_session(current_session)
     record_audit_event(
         db,

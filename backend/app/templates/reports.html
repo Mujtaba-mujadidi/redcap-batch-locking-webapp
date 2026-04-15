@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <style>
+    .reports-table-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+
+    .reports-table-meta,
+    .reports-table-search {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      flex-wrap: wrap;
+    }
+
+    .reports-table-controls label {
+      color: var(--text);
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+
+    .reports-table-controls input,
+    .reports-table-controls select {
+      min-height: 2.7rem;
+      padding: 0.72rem 0.82rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      background: #fbfcfe;
+      color: var(--text);
+    }
+
+    .reports-table-controls input {
+      min-width: min(24rem, 78vw);
+    }
+
+    .reports-table-controls input:focus,
+    .reports-table-controls select:focus {
+      outline: none;
+      border-color: rgba(99, 210, 199, 0.8);
+      box-shadow: 0 0 0 3px rgba(99, 210, 199, 0.14);
+    }
+
+    .reports-table-scroll {
+      max-height: 34rem;
+      overflow: auto;
+      border: 1px solid rgba(232, 238, 244, 0.95);
+      border-radius: 18px;
+      background: #ffffff;
+    }
+
+    .reports-table-scroll .data-table {
+      min-width: 960px;
+    }
+
+    .reports-table-scroll thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #ffffff;
+      box-shadow: inset 0 -1px 0 #edf1f6;
+    }
+
+    .reports-table-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-top: 1rem;
+    }
+
+    .reports-pagination {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      flex-wrap: wrap;
+    }
+
+    .reports-page-button {
+      min-width: 6rem;
+      padding: 0.72rem 0.92rem;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #ffffff;
+      color: var(--heading);
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .reports-page-button[disabled] {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .reports-empty-filter {
+      margin-top: 1rem;
+      padding: 1rem 1.05rem;
+      border: 1px dashed var(--border-strong);
+      border-radius: 14px;
+      background: #fbfcfe;
+    }
+  </style>
+
+  <div class="dashboard-shell app-shell">
+    {% include "partials/sidebar.html" %}
+
+    <main class="dashboard-main workspace-main">
+      <div class="content-column">
+        <section class="workspace-hero">
+          <div>
+            <h1 class="section-title">Reports</h1>
+            <p class="compact-copy">Older exports are listed here once they move out of the latest {{ recent_jobs_limit }} jobs.</p>
+          </div>
+        </section>
+
+        {% if success_message %}
+          <div class="banner banner-success">{{ success_message }}</div>
+        {% endif %}
+        {% if error_message %}
+          <div class="banner banner-error">{{ error_message }}</div>
+        {% endif %}
+
+        <section class="panel-card data-table-card">
+          <div class="panel-card-header">
+            <div>
+              <p class="mini-label">Export History</p>
+              <h3>Generated job reports</h3>
+            </div>
+          </div>
+
+          {% if report_rows %}
+            <div class="reports-table-controls">
+              <div class="reports-table-meta">
+                <label for="reports-entries-per-page">Show</label>
+                <select id="reports-entries-per-page">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+                <span class="compact-copy">entries</span>
+              </div>
+
+              <div class="reports-table-search">
+                <label for="reports-search">Filter</label>
+                <input
+                  id="reports-search"
+                  type="search"
+                  placeholder="Request, project, host, status, file"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+
+            <div class="reports-table-scroll">
+              <table class="data-table jobs-review-table" id="reports-table">
+                <thead>
+                  <tr>
+                    <th>Request</th>
+                    <th>Status</th>
+                    <th>Rows</th>
+                    <th>Updated</th>
+                    <th>File</th>
+                    <th class="actions-column">Export</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in report_rows %}
+                    <tr
+                      data-report-row
+                      data-search="{{ (row.job.request_file_name or 'Imported request')|lower }} {{ (row.job.redcap_project_title or 'Untitled project')|lower }} {{ (row.job.redcap_project_id or '')|string|lower }} {{ row.host_label|lower }} {{ row.job.status.value.replace('_', ' ').title()|lower }} {{ row.report.file_name|lower }}"
+                    >
+                      <td>
+                        <strong>{{ row.job.request_file_name or "Imported request" }}</strong>
+                        <p class="compact-copy">
+                          {{ row.job.redcap_project_title or "Untitled project" }}
+                          {% if row.job.redcap_project_id %} · Project {{ row.job.redcap_project_id }}{% endif %}
+                        </p>
+                        <p class="compact-copy">{{ row.host_label }}</p>
+                      </td>
+                      <td>
+                        <span class="status-pill {{ 'status-active' if row.job.status.value == 'completed' else 'status-inactive' }}">
+                          {{ row.job.status.value.replace('_', ' ').title() }}
+                        </span>
+                      </td>
+                      <td>{{ row.job.total_rows }}</td>
+                      <td>{{ row.job.updated_at.strftime("%d %b %Y %H:%M") }}</td>
+                      <td>
+                        <strong>{{ row.report.file_name }}</strong>
+                        <p class="compact-copy">
+                          {% if row.report.byte_size %}{{ row.report.byte_size }} bytes{% else %}CSV report{% endif %}
+                        </p>
+                      </td>
+                      <td class="actions-column">
+                        <a class="manage-button" href="{{ row.download_href }}">Export Report</a>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+
+            <div id="reports-empty-filter" class="reports-empty-filter compact-copy" hidden>
+              No reports match the current filter.
+            </div>
+
+            <div class="reports-table-footer">
+              <p id="reports-table-summary" class="compact-copy">Showing 0 to 0 of 0 entries</p>
+              <div class="reports-pagination">
+                <button id="reports-prev-page" class="reports-page-button" type="button">Previous</button>
+                <span id="reports-page-indicator" class="compact-copy">Page 1 of 1</span>
+                <button id="reports-next-page" class="reports-page-button" type="button">Next</button>
+              </div>
+            </div>
+          {% else %}
+            <p class="compact-copy jobs-empty-state">No older reports are available yet. The newest {{ recent_jobs_limit }} jobs stay on the Jobs page.</p>
+          {% endif %}
+        </section>
+      </div>
+    </main>
+  </div>
+
+  {% if report_rows %}
+    <script>
+      const reportsSearchInput = document.getElementById("reports-search");
+      const reportsEntriesSelect = document.getElementById("reports-entries-per-page");
+      const reportsSummary = document.getElementById("reports-table-summary");
+      const reportsPageIndicator = document.getElementById("reports-page-indicator");
+      const reportsPrevPage = document.getElementById("reports-prev-page");
+      const reportsNextPage = document.getElementById("reports-next-page");
+      const reportsEmptyFilter = document.getElementById("reports-empty-filter");
+      const reportRows = Array.from(document.querySelectorAll("[data-report-row]"));
+      let currentPage = 1;
+
+      function getFilteredRows() {
+        const query = (reportsSearchInput.value || "").trim().toLowerCase();
+        if (!query) {
+          return reportRows;
+        }
+        return reportRows.filter((row) => (row.dataset.search || "").includes(query));
+      }
+
+      function renderReportsTable() {
+        const filteredRows = getFilteredRows();
+        const rowsPerPage = Math.max(1, Number(reportsEntriesSelect.value || "25"));
+        const totalRows = filteredRows.length;
+        const totalPages = Math.max(1, Math.ceil(totalRows / rowsPerPage));
+        currentPage = Math.min(currentPage, totalPages);
+        const startIndex = totalRows === 0 ? 0 : (currentPage - 1) * rowsPerPage;
+        const visibleRows = new Set(filteredRows.slice(startIndex, startIndex + rowsPerPage));
+
+        reportRows.forEach((row) => {
+          row.hidden = !visibleRows.has(row);
+        });
+
+        const fromCount = totalRows === 0 ? 0 : startIndex + 1;
+        const toCount = totalRows === 0 ? 0 : Math.min(startIndex + rowsPerPage, totalRows);
+
+        reportsSummary.textContent = `Showing ${fromCount} to ${toCount} of ${totalRows} entries`;
+        reportsPageIndicator.textContent = `Page ${totalRows === 0 ? 0 : currentPage} of ${totalRows === 0 ? 0 : totalPages}`;
+        reportsPrevPage.disabled = currentPage <= 1 || totalRows === 0;
+        reportsNextPage.disabled = currentPage >= totalPages || totalRows === 0;
+        reportsEmptyFilter.hidden = totalRows !== 0;
+      }
+
+      reportsSearchInput.addEventListener("input", () => {
+        currentPage = 1;
+        renderReportsTable();
+      });
+
+      reportsEntriesSelect.addEventListener("change", () => {
+        currentPage = 1;
+        renderReportsTable();
+      });
+
+      reportsPrevPage.addEventListener("click", () => {
+        if (currentPage > 1) {
+          currentPage -= 1;
+          renderReportsTable();
+        }
+      });
+
+      reportsNextPage.addEventListener("click", () => {
+        currentPage += 1;
+        renderReportsTable();
+      });
+
+      renderReportsTable();
+    </script>
+  {% endif %}
+{% endblock %}
