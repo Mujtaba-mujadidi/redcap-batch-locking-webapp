@@ -53,6 +53,10 @@ body.modal-open {
   overflow: hidden;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .login-shell {
   display: grid;
   place-items: center;
@@ -277,6 +281,83 @@ body.modal-open {
   align-items: center;
   gap: 0.7rem;
   flex-wrap: wrap;
+}
+
+.toolbar-actions .header-action,
+.toolbar-actions .primary-button-inline,
+.modal-actions .header-action,
+.modal-actions .primary-button-inline {
+  min-width: 9.5rem;
+  height: 2.75rem;
+  padding: 0 1.05rem;
+}
+
+.import-request-card {
+  overflow: hidden;
+}
+
+.import-request-note {
+  margin-bottom: 1rem;
+}
+
+.import-request-form {
+  margin-top: 1rem;
+}
+
+.import-request-grid {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.import-request-banner {
+  margin-bottom: 0;
+}
+
+.import-request-error-copy {
+  margin-top: -0.2rem;
+}
+
+.import-progress-panel {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid rgba(217, 227, 236, 0.96);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fbfdff, #f4f8fc);
+}
+
+.import-progress-heading,
+.progress-heading,
+.job-progress-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.job-progress-summary {
+  min-width: 0;
+}
+
+.import-progress-heading h4,
+.progress-heading h3 {
+  margin: 0.18rem 0 0;
+  color: var(--heading);
+  font-size: 0.98rem;
+}
+
+.loader-spinner {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  border: 2px solid rgba(148, 163, 184, 0.28);
+  border-top-color: var(--accent-strong);
+  border-radius: 999px;
+  animation: spinner-rotate 820ms linear infinite;
+}
+
+.loader-spinner-small {
+  width: 0.82rem;
+  height: 0.82rem;
 }
 
 .management-grid {
@@ -920,6 +1001,17 @@ body.modal-open {
   box-shadow: 0 10px 18px rgba(99, 210, 199, 0.2);
 }
 
+.manage-button-secondary {
+  background: #ffffff;
+  color: var(--danger);
+  border: 1px solid rgba(201, 88, 78, 0.22);
+  box-shadow: none;
+}
+
+.manage-button-secondary:hover {
+  background: rgba(201, 88, 78, 0.08);
+}
+
 .datatable-footer {
   display: flex;
   align-items: center;
@@ -1304,6 +1396,7 @@ body.modal-open {
 .table-actions {
   display: grid;
   gap: 0.55rem;
+  justify-items: start;
 }
 
 .inline-form {
@@ -1429,6 +1522,16 @@ body.modal-open {
   }
 }
 
+@keyframes spinner-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (min-width: 920px) {
   .auth-metric-row,
   .metric-grid {
@@ -1445,6 +1548,10 @@ body.modal-open {
 
   .stats-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .import-request-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .stats-grid-wide {

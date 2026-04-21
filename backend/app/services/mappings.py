@@ -380,7 +380,11 @@ def _score_status_candidates(
         if field_type not in {"yesno", "truefalse", "checkbox", "radio", "dropdown"}:
             continue
 
-        score = _alias_score(field_definition, alias_bank["status"]) + _proximity_score(field_definition, complete_index)
+        alias_score = _alias_score(field_definition, alias_bank["status"])
+        if alias_score <= 0:
+            continue
+
+        score = alias_score + _proximity_score(field_definition, complete_index)
         if field_type in {"yesno", "truefalse"}:
             score += 28
         elif field_type == "checkbox":
@@ -421,7 +425,11 @@ def _score_date_candidates(
         if field_type != "text":
             continue
 
-        score = _alias_score(field_definition, alias_bank["date"]) + _proximity_score(field_definition, complete_index)
+        alias_score = _alias_score(field_definition, alias_bank["date"])
+        if alias_score <= 0:
+            continue
+
+        score = alias_score + _proximity_score(field_definition, complete_index)
         if validation_type.startswith("date") or validation_type.startswith("datetime"):
             score += 26
         elif score >= 28:

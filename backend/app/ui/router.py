@@ -75,9 +75,8 @@ templates = Jinja2Templates(directory=str(app_dir / "templates"))
 templates.env.globals["asset_version"] = str(int((app_dir / "static" / "auth.css").stat().st_mtime))
 
 REQUEST_TEMPLATE_FILENAME = "redcap-batch-request-template.csv"
-IMPORT_MODAL_ID = "import-request-modal"
 PROCESS_MODAL_ID = "process-job-modal"
-REQUEST_REQUIRED_COLUMNS = ("record_id", "repeat_instance", "target_instrument", "action")
+REQUEST_REQUIRED_COLUMNS = ("record_id", "target_instrument", "action")
 REQUEST_ALLOWED_ACTIONS = {"lock", "unlock"}
 MAPPING_NONE_OPTION = "__NONE__"
 MAPPING_AUTO_OPTION = "__AUTO__"
@@ -101,6 +100,7 @@ JOBS_VISIBLE_STATUSES = (
     JobStatus.QUEUED,
     JobStatus.RUNNING,
     JobStatus.WAITING_DUE_TO_RATE_LIMIT,
+    JobStatus.CANCELLED,
     JobStatus.COMPLETED,
     JobStatus.COMPLETED_WITH_ERRORS,
     JobStatus.FAILED,
@@ -115,6 +115,10 @@ ACTIVE_JOB_STATUSES = {
     JobStatus.RUNNING,
     JobStatus.WAITING_DUE_TO_RATE_LIMIT,
 }
+USER_CANCELLABLE_JOB_STATUSES = {
+    JobStatus.AWAITING_MAPPING_CONFIRMATION,
+    JobStatus.READY,
+}
 _background_job_threads_lock = Lock()
 _background_job_threads: dict[UUID, Thread] = {}
 REQUEST_TEMPLATE_COLUMNS = (
@@ -126,8 +130,8 @@ REQUEST_TEMPLATE_COLUMNS = (
     },
     {
         "name": "repeat_instance",
-        "required": True,
-        "description": "Repeat instance number for repeating instruments or events.",
+        "required": False,
+        "description": "Repeat instance number for repeating instruments or events. Leave blank to use instance 1.",
         "example": "1",
     },
     {
@@ -220,6 +224,9 @@ def _build_jobs_redirect(
     error: str | None = None,
     open_modal: str | None = None,
     process_job_id: UUID | None = None,
+    open_import: bool = False,
+    import_error: str | None = None,
+    import_api_url: str | None = None,
 ) -> RedirectResponse:
     params = {
         key: value
@@ -228,6 +235,9 @@ def _build_jobs_redirect(
             "error": error,
             "open_modal": open_modal,
             "process_job_id": str(process_job_id) if process_job_id else None,
+            "open_import": "1" if open_import else None,
+            "import_error": import_error,
+            "import_api_url": import_api_url,
         }.items()
         if value
     }
@@ -254,6 +264,14 @@ def _contains_control_characters(value: str, *, allow_newlines: bool = False) ->
         allowed_controls.update({"\n", "\r"})
 
     return any(ord(character) < 32 and character not in allowed_controls for character in value)
+
+
+def _strip_unsupported_control_characters(value: str, *, allow_newlines: bool = False) -> str:
+    allowed_controls = {"\t"}
+    if allow_newlines:
+        allowed_controls.update({"\n", "\r"})
+
+    return "".join(character for character in value if ord(character) >= 32 or character in allowed_controls)
 
 
 def _sanitize_text_input(
@@ -292,7 +310,12 @@ def _sanitize_filename(filename: str, *, label: str) -> str:
     return cleaned_filename
 
 
-def _read_uploaded_text_file(upload_file: UploadFile, *, label: str) -> tuple[str, bytes]:
+def _read_uploaded_text_file(
+    upload_file: UploadFile,
+    *,
+    label: str,
+    repair_control_characters: bool = False,
+) -> tuple[str, bytes]:
     file_bytes = upload_file.file.read(MAX_UPLOAD_BYTES + 1)
     if not file_bytes:
         raise ValueError(f"The selected {label} is empty.")
@@ -305,14 +328,26 @@ def _read_uploaded_text_file(upload_file: UploadFile, *, label: str) -> tuple[st
     except UnicodeDecodeError as exc:
         raise ValueError(f"{label.capitalize()} must be UTF-8 encoded.") from exc
 
-    if _contains_control_characters(decoded_text, allow_newlines=True):
+    if repair_control_characters:
+        decoded_text = _strip_unsupported_control_characters(decoded_text, allow_newlines=True)
+    elif _contains_control_characters(decoded_text, allow_newlines=True):
         raise ValueError(f"The selected {label} contains unsupported characters.")
 
     return decoded_text, file_bytes
 
 
-def _sanitize_csv_cell(value: str, *, row_index: int, column_name: str) -> str:
-    cleaned_value = value.strip()
+def _sanitize_csv_cell(
+    value: str,
+    *,
+    row_index: int,
+    column_name: str,
+    repair_control_characters: bool = False,
+) -> str:
+    cleaned_value = (
+        _strip_unsupported_control_characters(value)
+        if repair_control_characters
+        else value
+    ).strip()
     if len(cleaned_value) > MAX_CSV_CELL_LENGTH:
         raise ValueError(f"Row {row_index} has a value that is too long in {column_name}.")
 
@@ -323,8 +358,12 @@ def _sanitize_csv_cell(value: str, *, row_index: int, column_name: str) -> str:
 
 
 def _coerce_repeat_instance(value: str, *, row_index: int) -> int:
+    cleaned_value = value.strip()
+    if not cleaned_value:
+        return 1
+
     try:
-        repeat_instance = int(value)
+        repeat_instance = int(cleaned_value)
     except ValueError as exc:
         raise ValueError(f"Row {row_index} repeat_instance must be a whole number.") from exc
 
@@ -532,13 +571,25 @@ def _inspect_queries_import_file(
     if not filename.lower().endswith(".csv"):
         raise ValueError("Existing queries import only accepts .csv files.")
 
-    decoded_csv, _ = _read_uploaded_text_file(queries_file, label="existing queries CSV")
+    decoded_csv, _ = _read_uploaded_text_file(
+        queries_file,
+        label="existing queries CSV",
+        repair_control_characters=True,
+    )
     reader = csv.reader(StringIO(decoded_csv, newline=""))
     header = next(reader, None)
     if header is None:
         raise ValueError("The selected existing queries CSV does not contain a header row.")
 
-    normalized_header = [_sanitize_csv_cell(cell, row_index=1, column_name="header") for cell in header]
+    normalized_header = [
+        _sanitize_csv_cell(
+            cell,
+            row_index=1,
+            column_name="header",
+            repair_control_characters=True,
+        )
+        for cell in header
+    ]
     if not any(normalized_header):
         raise ValueError("The selected existing queries CSV does not contain a valid header row.")
     query_column_indexes = _resolve_query_column_indexes([_normalize_header_key(cell) for cell in normalized_header])
@@ -547,19 +598,24 @@ def _inspect_queries_import_file(
     row_count = 0
     unresolved_queries: list[dict[str, object]] = []
     for row_index, row in enumerate(reader, start=2):
-        normalized_row = [
-            _sanitize_csv_cell(cell, row_index=row_index, column_name=normalized_header[position] if position < len(normalized_header) else f"column_{position + 1}")
-            for position, cell in enumerate(row)
-        ]
-        if not any(normalized_row):
+        row_values = {
+            column_name: _sanitize_csv_cell(
+                row[index] if index < len(row) else "",
+                row_index=row_index,
+                column_name=normalized_header[index] if index < len(normalized_header) else column_name,
+                repair_control_characters=True,
+            )
+            for column_name, index in query_column_indexes.items()
+        }
+        if not any(row_values.values()):
             continue
 
         row_count += 1
-        record_value = normalized_row[query_column_indexes["record"]] if query_column_indexes["record"] < len(normalized_row) else ""
-        field_value = normalized_row[query_column_indexes["field"]] if query_column_indexes["field"] < len(normalized_row) else ""
-        status_value = normalized_row[query_column_indexes["status"]] if query_column_indexes["status"] < len(normalized_row) else ""
-        event_value = normalized_row[query_column_indexes["event"]] if "event" in query_column_indexes and query_column_indexes["event"] < len(normalized_row) else ""
-        instance_value = normalized_row[query_column_indexes["instance"]] if "instance" in query_column_indexes and query_column_indexes["instance"] < len(normalized_row) else ""
+        record_value = row_values["record"]
+        field_value = row_values["field"]
+        status_value = row_values["status"]
+        event_value = row_values.get("event", "")
+        instance_value = row_values.get("instance", "")
 
         record_id, repeat_instance = _parse_query_record_context(
             record_value,
@@ -870,7 +926,13 @@ def _summarize_retry_candidates(rows: list[JobRow]) -> dict[str, object]:
     }
 
 
-def _mark_unprocessed_rows_as_cancelled(db: Session, *, job_id: UUID, reason: str) -> int:
+def _mark_unprocessed_rows_as_cancelled(
+    db: Session,
+    *,
+    job_id: UUID,
+    reason: str,
+    message: str = "Row was not processed because the background run stopped early.",
+) -> int:
     rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job_id).order_by(JobRow.row_number)).all())
     cancelled_count = 0
 
@@ -885,13 +947,13 @@ def _mark_unprocessed_rows_as_cancelled(db: Session, *, job_id: UUID, reason: st
 
         row_result.status = RowResultStatus.CANCELLED
         row_result.outcome_code = "not_processed"
-        row_result.message = "Row was not processed because the background run stopped early."
+        row_result.message = message
         row_result.redcap_http_status = None
         row_result.query_blocking_count = None
         row_result.details_json = {
             "job_failure_reason": reason,
             "processing_steps": [
-                "Row was not processed because the background run stopped early.",
+                message,
             ],
         }
         row_result.duration_ms = None
@@ -1017,7 +1079,7 @@ def _summarize_job_progress(job: Job) -> dict[str, object]:
         detail_parts.append(f"{job.failed_rows} failed")
 
     return {
-        "visible": job.status in ACTIVE_JOB_STATUSES or processed_rows > 0,
+        "visible": job.status in ACTIVE_JOB_STATUSES,
         "percent": progress_percent,
         "summary": summary_copy,
         "message": latest_message,
@@ -1125,36 +1187,26 @@ def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
     writer = csv.writer(output)
     writer.writerow(
         [
-            "job_id",
-            "job_status",
-            "job_type",
-            "project_id",
-            "project_title",
-            "request_file_name",
-            "row_number",
-            "record_id",
-            "target_instrument",
-            "action",
-            "event_name",
-            "arm_name",
-            "repeat_instance",
-            "row_status",
-            "outcome_code",
-            "message",
-            "query_blocking_count",
-            "redcap_http_status",
-            "initial_lock_state",
-            "form_complete_field_name",
-            "form_complete_value",
-            "shadow_fields_phase",
-            "shadow_fields_payload_json",
-            "action_called",
-            "locked_by",
-            "locked_at",
-            "status_before",
-            "status_after",
-            "processing_steps",
-            "input_payload_json",
+            "Job Type",
+            "Project ID",
+            "Project Title",
+            "Request File Name",
+            "Record ID",
+            "Target Instrument",
+            "Action",
+            "Event Name",
+            "Arm Name",
+            "Repeat Instance",
+            "Request Status",
+            "Outcome",
+            "Message",
+            "Form Open Queries Count",
+            "REDCap HTTP Status",
+            "Action Called",
+            "Locked By",
+            "Locked At",
+            "Status Before",
+            "Status After",
         ]
     )
 
@@ -1163,13 +1215,10 @@ def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
         details = row_result.details_json if row_result and isinstance(row_result.details_json, dict) else {}
         writer.writerow(
             [
-                str(job.id),
-                job.status.value,
                 job.job_type.value,
                 job.redcap_project_id or "",
                 job.redcap_project_title or "",
                 job.request_file_name or "",
-                row.row_number,
                 row.record_id,
                 row.target_instrument,
                 row.action.value,
@@ -1181,18 +1230,11 @@ def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
                 row_result.message if row_result else "",
                 row_result.query_blocking_count if row_result and row_result.query_blocking_count is not None else "",
                 row_result.redcap_http_status if row_result and row_result.redcap_http_status is not None else "",
-                _serialize_report_cell(details.get("initial_lock_state") or details.get("status_before")),
-                _serialize_report_cell(details.get("form_complete_field_name")),
-                _serialize_report_cell(details.get("form_complete_value")),
-                _serialize_report_cell(details.get("shadow_fields_phase")),
-                _serialize_report_cell(details.get("shadow_fields_payload")),
                 _serialize_report_cell(details.get("action_called")),
                 _serialize_report_cell(details.get("locked_by")),
                 _serialize_report_cell(details.get("locked_at")),
                 _serialize_report_cell(details.get("status_before")),
                 _serialize_report_cell(details.get("status_after")),
-                _serialize_processing_steps(details),
-                _serialize_report_cell(row.input_payload_json),
             ]
         )
 
@@ -1285,12 +1327,15 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
         action_href = None
         action_label = None
         action_kind = None
+        cancel_label = None
+        launch_mode: str | None = None
         if job.status == JobStatus.AWAITING_MAPPING_CONFIRMATION:
             action_href = f"/mappings?job_id={job.id}"
             action_label = "Review mappings"
             action_kind = "link"
             action_hint = "Manual review needed before execution."
             status_tone = "status-review"
+            cancel_label = "Cancel Import"
         elif job.status == JobStatus.READY:
             launch_mode = _resolve_processing_mode(row_count=job.total_rows or 0)
             if has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
@@ -1314,6 +1359,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                     f"{progress['rate_limit_copy']}"
                 )
             status_tone = "status-active"
+            cancel_label = "Cancel Import"
         elif job.status == JobStatus.QUEUED:
             active_mode = str(progress["mode"])
             action_hint = (
@@ -1334,6 +1380,9 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 f"{_processing_mode_action_label(active_mode)} continues."
             )
             status_tone = "status-review"
+        elif job.status == JobStatus.CANCELLED:
+            action_hint = job.last_error_summary or "Cancelled before processing started."
+            status_tone = "status-inactive"
         elif job.status == JobStatus.COMPLETED:
             action_href = f"/reports/{report.id}/download" if report is not None else None
             action_label = "Export Report" if report is not None else None
@@ -1344,6 +1393,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             retry_rows = _get_retryable_rows(db, job_id=job.id)
             retry_summary = _summarize_retry_candidates(retry_rows)
             retry_launch_mode = _resolve_processing_mode(row_count=int(retry_summary["count"]))
+            launch_mode = retry_launch_mode if retry_summary["count"] else None
             if retry_summary["count"] and has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
                 action_label = str(retry_summary["action_label"])
                 action_kind = "process_cached"
@@ -1382,6 +1432,8 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 "action_label": action_label,
                 "action_kind": action_kind,
                 "action_hint": action_hint,
+                "cancel_label": cancel_label,
+                "launch_mode": launch_mode,
                 "report_href": f"/reports/{report.id}/download" if report is not None else None,
                 "progress": progress,
             }
@@ -1789,8 +1841,13 @@ def jobs_page(request: Request, db: Session = Depends(get_db_session)):
             "recent_jobs_limit": RECENT_JOBS_LIMIT,
             "success_message": request.query_params.get("success"),
             "error_message": request.query_params.get("error"),
+            "import_card_open": request.query_params.get("open_import") == "1"
+            or bool(request.query_params.get("import_error")),
+            "import_error_message": request.query_params.get("import_error"),
+            "import_form_values": {
+                "redcap_api_url": request.query_params.get("import_api_url") or "",
+            },
             "open_modal": request.query_params.get("open_modal"),
-            "import_modal_id": IMPORT_MODAL_ID,
             "process_modal_id": PROCESS_MODAL_ID,
             "selected_process_job": selected_process_job,
             **_build_sidebar_context(active_path="/jobs", current_user=session.user),
@@ -1863,6 +1920,7 @@ def import_jobs_request_file(
     if session is None:
         return RedirectResponse("/login", status_code=303)
 
+    submitted_api_url = str(redcap_api_url or "").strip()[:MAX_TEXT_INPUT_LENGTH]
     try:
         cleaned_api_url = canonicalize_redcap_api_url(_validate_redcap_api_url(redcap_api_url))
         cleaned_api_key = _validate_redcap_api_key(redcap_api_key)
@@ -1876,7 +1934,11 @@ def import_jobs_request_file(
             metadata={"reason": str(exc)},
         )
         db.commit()
-        return _build_jobs_redirect(error=str(exc), open_modal=IMPORT_MODAL_ID)
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error=str(exc),
+            import_api_url=submitted_api_url,
+        )
 
     if request_file is None:
         record_audit_event(
@@ -1888,7 +1950,11 @@ def import_jobs_request_file(
             metadata={"reason": "No file selected."},
         )
         db.commit()
-        return _build_jobs_redirect(error="Choose a request CSV file to import.", open_modal=IMPORT_MODAL_ID)
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error="Choose a request CSV file to import.",
+            import_api_url=cleaned_api_url,
+        )
 
     try:
         filename, parsed_rows, request_file_bytes = _parse_request_import_file(request_file)
@@ -1909,7 +1975,11 @@ def import_jobs_request_file(
             metadata={"reason": str(exc)},
         )
         db.commit()
-        return _build_jobs_redirect(error=str(exc), open_modal=IMPORT_MODAL_ID)
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error=str(exc),
+            import_api_url=cleaned_api_url,
+        )
 
     if not preflight_bundle["locking_api_available"]:
         reason = preflight_bundle["locking_api_probe"]["reason"]
@@ -1924,7 +1994,11 @@ def import_jobs_request_file(
             metadata={"reason": error_message, "api_url": cleaned_api_url},
         )
         db.commit()
-        return _build_jobs_redirect(error=error_message, open_modal=IMPORT_MODAL_ID)
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error=error_message,
+            import_api_url=cleaned_api_url,
+        )
 
     project_info = preflight_bundle["project_info"]
     redcap_project_id = str(project_info.get("project_id") or "").strip()
@@ -1940,7 +2014,11 @@ def import_jobs_request_file(
             metadata={"reason": error_message, "api_url": cleaned_api_url},
         )
         db.commit()
-        return _build_jobs_redirect(error=error_message, open_modal=IMPORT_MODAL_ID)
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error=error_message,
+            import_api_url=cleaned_api_url,
+        )
 
     instrument_lookup = {
         str(item.get("instrument_name") or ""): item for item in preflight_bundle["instruments"] if item.get("instrument_name")
@@ -1972,7 +2050,11 @@ def import_jobs_request_file(
             metadata={"reason": error_message, "api_url": cleaned_api_url},
         )
         db.commit()
-        return _build_jobs_redirect(error=error_message, open_modal=IMPORT_MODAL_ID)
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error=error_message,
+            import_api_url=cleaned_api_url,
+        )
 
     redcap_host = _upsert_redcap_host(db, cleaned_api_url)
     store_redcap_api_key(
@@ -2946,6 +3028,68 @@ def process_job_from_ui(
         )
         + "Progress will appear on the Jobs page and rate-limit waits will be shown there."
     )
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job_from_ui(
+    job_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db_session),
+):
+    _, session = get_optional_session(request, db)
+    if session is None:
+        return RedirectResponse("/login", status_code=303)
+
+    job = db.get(Job, job_id)
+    if job is None or not _can_access_job(session.user, job):
+        return RedirectResponse("/jobs", status_code=303)
+
+    if job.status not in USER_CANCELLABLE_JOB_STATUSES:
+        return _build_jobs_redirect(error="Only imported jobs that are still awaiting action can be cancelled.")
+
+    previous_status = job.status
+    cancellation_message = "Import was cancelled before processing started."
+    cancelled_count = _mark_unprocessed_rows_as_cancelled(
+        db,
+        job_id=job.id,
+        reason=cancellation_message,
+        message="Row was not processed because the import was cancelled before execution started.",
+    )
+    _recalculate_job_rollups(db, job=job)
+    job.status = JobStatus.CANCELLED
+    job.cancellation_requested_at = utc_now()
+    job.started_at = None
+    job.completed_at = utc_now()
+    job.last_error_summary = cancellation_message
+    _set_job_runtime_state(
+        job,
+        phase="cancelled",
+        latest_message=cancellation_message,
+        rate_limit_wait_until=None,
+    )
+    _record_job_event(
+        db,
+        job=job,
+        event_type="job.cancelled",
+        message=(
+            f"Cancelled before processing started. {_format_row_count(cancelled_count).capitalize()} "
+            f"{'was' if cancelled_count == 1 else 'were'} left unprocessed."
+        ),
+        status_from=previous_status,
+        status_to=JobStatus.CANCELLED,
+        payload_json={"cancelled_rows": cancelled_count},
+    )
+    record_audit_event(
+        db,
+        actor_user_id=session.user.id,
+        action="jobs.cancel",
+        object_type="job",
+        object_id=str(job.id),
+        request=request,
+        metadata={"previous_status": previous_status.value, "cancelled_rows": cancelled_count},
+    )
+    db.commit()
+    return _build_jobs_redirect(success=f"Cancelled import for {job.request_file_name or 'job'}.")
 
 
 @router.get("/mappings", response_class=HTMLResponse)
