@@ -87,6 +87,7 @@ MAX_TEXT_INPUT_LENGTH = 2048
 MAX_API_KEY_LENGTH = 512
 MAX_CSV_CELL_LENGTH = 512
 RECENT_JOBS_LIMIT = 3
+DEFAULT_LIVE_PROCESSING_MAX_ROWS = 5
 QUERY_COLUMN_ALIASES = {
     "record": {"record", "record id", "record / instance"},
     "field": {"field", "field variable", "field name"},
@@ -785,6 +786,29 @@ def _format_row_count(count: int) -> str:
     return f"{count} row{'s' if count != 1 else ''}"
 
 
+def _resolve_live_processing_max_rows() -> int:
+    return max(int(getattr(settings, "live_processing_max_rows", DEFAULT_LIVE_PROCESSING_MAX_ROWS) or 0), 0)
+
+
+def _resolve_processing_mode(*, row_count: int) -> str:
+    live_processing_max_rows = _resolve_live_processing_max_rows()
+    if live_processing_max_rows > 0 and 0 < row_count <= live_processing_max_rows:
+        return "live"
+    return "background"
+
+
+def _processing_mode_runtime_phrase(processing_mode: str) -> str:
+    return "live in this browser session" if processing_mode == "live" else "in the background"
+
+
+def _processing_mode_action_label(processing_mode: str) -> str:
+    return "live processing" if processing_mode == "live" else "background processing"
+
+
+def _processing_mode_title(processing_mode: str) -> str:
+    return "Live" if processing_mode == "live" else "Background"
+
+
 def _get_retryable_rows(db: Session, *, job_id: UUID) -> list[JobRow]:
     return list(
         db.scalars(
@@ -961,9 +985,17 @@ def _summarize_job_progress(job: Job) -> dict[str, object]:
             )
 
     if job.status == JobStatus.QUEUED and not latest_message:
-        latest_message = "Queued to start in the background."
+        latest_message = (
+            "Queued to start in the background."
+            if processing_mode == "background"
+            else "Preparing to start live processing in this browser session."
+        )
     elif job.status == JobStatus.RUNNING and not latest_message:
-        latest_message = "Processing rows in the background."
+        latest_message = (
+            "Processing rows in the background."
+            if processing_mode == "background"
+            else "Processing rows live in this browser session."
+        )
     elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT and not latest_message:
         latest_message = "Paused because the REDCap API rate limit was reached."
 
@@ -1260,26 +1292,47 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             action_hint = "Manual review needed before execution."
             status_tone = "status-review"
         elif job.status == JobStatus.READY:
+            launch_mode = _resolve_processing_mode(row_count=job.total_rows or 0)
             if has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
                 action_label = "Process"
                 action_kind = "process_cached"
                 action_hint = (
-                    f"Starts background processing for this REDCap project using the saved API key. "
+                    "Starts live processing in this browser session for this REDCap project using the saved API key. "
+                    if launch_mode == "live"
+                    else "Starts background processing for this REDCap project using the saved API key. "
+                ) + (
                     f"{progress['rate_limit_copy']}"
                 )
             else:
                 action_label = "Process"
                 action_kind = "process"
-                action_hint = f"Enter the REDCap API key to start background processing. {progress['rate_limit_copy']}"
+                action_hint = (
+                    "Enter the REDCap API key to start live processing in this browser session for this REDCap project. "
+                    if launch_mode == "live"
+                    else "Enter the REDCap API key to start background processing for this REDCap project. "
+                ) + (
+                    f"{progress['rate_limit_copy']}"
+                )
             status_tone = "status-active"
         elif job.status == JobStatus.QUEUED:
-            action_hint = f"Queued in the background for this REDCap project. {progress['rate_limit_copy']}"
+            active_mode = str(progress["mode"])
+            action_hint = (
+                f"Queued {_processing_mode_runtime_phrase(active_mode)} for this REDCap project. {progress['rate_limit_copy']}"
+            )
             status_tone = "status-review"
         elif job.status == JobStatus.RUNNING:
-            action_hint = f"This job is currently being processed in the background. {progress['rate_limit_copy']}"
+            active_mode = str(progress["mode"])
+            action_hint = (
+                f"This job is currently being processed {_processing_mode_runtime_phrase(active_mode)}. "
+                f"{progress['rate_limit_copy']}"
+            )
             status_tone = "status-review"
         elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT:
-            action_hint = progress["wait_message"] or "Waiting for the REDCap API rate-limit window to reopen."
+            active_mode = str(progress["mode"])
+            action_hint = progress["wait_message"] or (
+                "Waiting for the REDCap API rate-limit window to reopen before "
+                f"{_processing_mode_action_label(active_mode)} continues."
+            )
             status_tone = "status-review"
         elif job.status == JobStatus.COMPLETED:
             action_href = f"/reports/{report.id}/download" if report is not None else None
@@ -1290,17 +1343,20 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
         elif job.status in {JobStatus.COMPLETED_WITH_ERRORS, JobStatus.FAILED}:
             retry_rows = _get_retryable_rows(db, job_id=job.id)
             retry_summary = _summarize_retry_candidates(retry_rows)
+            retry_launch_mode = _resolve_processing_mode(row_count=int(retry_summary["count"]))
             if retry_summary["count"] and has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
                 action_label = str(retry_summary["action_label"])
                 action_kind = "process_cached"
                 action_hint = (
-                    f"{_build_job_outcome_copy(job)} Retry will process {retry_summary['selection_copy']} only with the saved API key."
+                    f"{_build_job_outcome_copy(job)} Retry will process {retry_summary['selection_copy']} only "
+                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} with the saved API key."
                 )
             elif retry_summary["count"]:
                 action_label = str(retry_summary["action_label"])
                 action_kind = "process"
                 action_hint = (
-                    f"{_build_job_outcome_copy(job)} Retry will process {retry_summary['selection_copy']} only once you enter the API key."
+                    f"{_build_job_outcome_copy(job)} Retry will process {retry_summary['selection_copy']} only "
+                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} once you enter the API key."
                 )
             elif report is not None:
                 action_href = f"/reports/{report.id}/download"
@@ -2074,8 +2130,9 @@ def _spawn_background_job(job_id: UUID, actor_user_id: UUID, api_key: str, retry
             return False
 
         worker = Thread(
-            target=_run_job_in_background,
+            target=_run_job_processing,
             args=(job_id, actor_user_id, api_key, retry_row_ids or []),
+            kwargs={"processing_mode": "background"},
             name=f"job-worker-{job_id}",
             daemon=True,
         )
@@ -2084,7 +2141,15 @@ def _spawn_background_job(job_id: UUID, actor_user_id: UUID, api_key: str, retry
         return True
 
 
-def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retry_row_ids: list[UUID]) -> None:
+def _run_job_processing(
+    job_id: UUID,
+    actor_user_id: UUID,
+    api_key: str,
+    retry_row_ids: list[UUID],
+    *,
+    processing_mode: str = "background",
+) -> None:
+    processing_mode = "live" if processing_mode == "live" else "background"
     db = SessionLocal()
     try:
         job = db.get(Job, job_id)
@@ -2105,11 +2170,11 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
                 job.status = JobStatus.WAITING_DUE_TO_RATE_LIMIT
                 _set_job_runtime_state(
                     job,
-                    mode="background",
+                    mode=processing_mode,
                     phase="rate_limited",
                     latest_message=(
                         f"Paused after reaching the REDCap API limit of {int(payload.get('rate_limit_per_minute') or resolved_rate_limit)} "
-                        "calls per minute for this REDCap project."
+                        f"calls per minute for this REDCap project during {_processing_mode_action_label(processing_mode)}."
                     ),
                     rate_limit_wait_until=datetime.fromtimestamp(wait_until, tz=utc_now().tzinfo).isoformat(),
                     rate_limit_per_minute=int(payload.get("rate_limit_per_minute") or resolved_rate_limit),
@@ -2132,9 +2197,9 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
                 job.status = JobStatus.RUNNING
                 _set_job_runtime_state(
                     job,
-                    mode="background",
+                    mode=processing_mode,
                     phase="processing_rows",
-                    latest_message="Rate-limit window reopened. Resuming background processing.",
+                    latest_message=f"Rate-limit window reopened. Resuming {_processing_mode_action_label(processing_mode)}.",
                     rate_limit_wait_until=None,
                     rate_limit_per_minute=int(payload.get("rate_limit_per_minute") or resolved_rate_limit),
                 )
@@ -2142,7 +2207,7 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
                     db,
                     job=job,
                     event_type="job.rate_limit_wait_finished",
-                    message="Rate-limit window reopened. Background processing resumed.",
+                    message=f"Rate-limit window reopened. {_processing_mode_title(processing_mode)} processing resumed.",
                     status_from=previous_status,
                     status_to=JobStatus.RUNNING,
                 )
@@ -2172,14 +2237,14 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
             retry_unprocessed_count = int(retry_summary["unprocessed_count"])
         _set_job_runtime_state(
             job,
-            mode="background",
+            mode=processing_mode,
             phase="preflight",
             latest_message=(
-                "Checking REDCap access and loading project details before retrying remaining rows in the background."
+                f"Checking REDCap access and loading project details before retrying remaining rows {_processing_mode_runtime_phrase(processing_mode)}."
                 if retry_scope == "remaining_rows"
-                else "Checking REDCap access and loading project details before retrying failed rows in the background."
+                else f"Checking REDCap access and loading project details before retrying failed rows {_processing_mode_runtime_phrase(processing_mode)}."
                 if retry_row_ids
-                else "Checking REDCap access and loading project details in the background."
+                else f"Checking REDCap access and loading project details {_processing_mode_runtime_phrase(processing_mode)}."
             ),
             rate_limit_wait_until=None,
             rate_limit_per_minute=resolved_rate_limit,
@@ -2193,11 +2258,11 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
             job=job,
             event_type="job.processing_started",
             message=(
-                "Background retry started for remaining rows from the Jobs page."
+                f"{_processing_mode_title(processing_mode)} retry started for remaining rows from the Jobs page."
                 if retry_scope == "remaining_rows"
-                else "Background retry started for failed rows from the Jobs page."
+                else f"{_processing_mode_title(processing_mode)} retry started for failed rows from the Jobs page."
                 if retry_row_ids
-                else "Background job execution started from the Jobs page."
+                else f"{_processing_mode_title(processing_mode)} job execution started from the Jobs page."
             ),
             status_from=previous_status,
             status_to=JobStatus.RUNNING,
@@ -2238,14 +2303,14 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
 
             _set_job_runtime_state(
                 job,
-                mode="background",
+                mode=processing_mode,
                 phase="processing_rows",
                 latest_message=(
-                    "Retrying remaining rows against REDCap in the background."
+                    f"Retrying remaining rows against REDCap {_processing_mode_runtime_phrase(processing_mode)}."
                     if retry_scope == "remaining_rows"
-                    else "Retrying failed rows against REDCap in the background."
+                    else f"Retrying failed rows against REDCap {_processing_mode_runtime_phrase(processing_mode)}."
                     if retry_row_ids
-                    else "Processing request rows against REDCap in the background."
+                    else f"Processing request rows against REDCap {_processing_mode_runtime_phrase(processing_mode)}."
                 ),
                 rate_limit_wait_until=None,
                 rate_limit_per_minute=resolved_rate_limit,
@@ -2593,14 +2658,14 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
                     job.status = JobStatus.RUNNING
                     _set_job_runtime_state(
                         job,
-                        mode="background",
+                        mode=processing_mode,
                         phase="processing_rows",
                         latest_message=(
-                            f"Retried {job.processed_rows} of {len(rows)} remaining rows in the background."
+                            f"Retried {job.processed_rows} of {len(rows)} remaining rows {_processing_mode_runtime_phrase(processing_mode)}."
                             if retry_scope == "remaining_rows"
-                            else f"Retried {job.processed_rows} of {len(rows)} failed rows in the background."
+                            else f"Retried {job.processed_rows} of {len(rows)} failed rows {_processing_mode_runtime_phrase(processing_mode)}."
                             if retry_row_ids
-                            else f"Processed {job.processed_rows} of {len(rows)} rows in the background."
+                            else f"Processed {job.processed_rows} of {len(rows)} rows {_processing_mode_runtime_phrase(processing_mode)}."
                         ),
                         rate_limit_wait_until=None,
                         rate_limit_per_minute=resolved_rate_limit,
@@ -2623,9 +2688,9 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
 
         _set_job_runtime_state(
             job,
-            mode="background",
+            mode=processing_mode,
             phase="completed",
-            latest_message="Background processing finished.",
+            latest_message=f"{_processing_mode_title(processing_mode)} processing finished.",
             rate_limit_wait_until=None,
             rate_limit_per_minute=resolved_rate_limit,
             retry_scope=retry_scope,
@@ -2637,7 +2702,7 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
             db,
             job=job,
             event_type="job.processing_completed",
-            message="Background job execution finished.",
+            message=f"{_processing_mode_title(processing_mode)} job execution finished.",
             status_from=final_previous_status,
             status_to=job.status,
             payload_json={
@@ -2661,7 +2726,7 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
                 "final_status": job.status.value,
                 "processed_rows": job.processed_rows,
                 "failed_rows": job.failed_rows,
-                "processing_mode": "background",
+                "processing_mode": processing_mode,
             },
         )
         db.commit()
@@ -2677,7 +2742,7 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
             job.last_error_summary = str(exc)
             _set_job_runtime_state(
                 job,
-                mode="background",
+                mode=processing_mode,
                 phase="failed",
                 latest_message=str(exc),
                 rate_limit_wait_until=None,
@@ -2706,7 +2771,7 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
                 object_id=str(job.id),
                 metadata={
                     "reason": str(exc),
-                    "processing_mode": "background",
+                    "processing_mode": processing_mode,
                     "unprocessed_rows": cancelled_count,
                     "processed_rows": job.processed_rows,
                 },
@@ -2714,7 +2779,8 @@ def _run_job_in_background(job_id: UUID, actor_user_id: UUID, api_key: str, retr
             db.commit()
     finally:
         db.close()
-        _release_background_job_thread(job_id)
+        if processing_mode == "background":
+            _release_background_job_thread(job_id)
 
 
 @router.post("/jobs/{job_id}/process")
@@ -2780,6 +2846,8 @@ def process_job_from_ui(
         retry_summary = _summarize_retry_candidates(retry_rows)
         if not retry_row_ids:
             return _build_jobs_redirect(error="This job has no failed or unprocessed rows left to retry.")
+    active_row_count = len(retry_row_ids) if retry_row_ids else int(job.total_rows or 0)
+    launch_mode = _resolve_processing_mode(row_count=active_row_count)
 
     active_project_job = _find_active_project_job(db, job=job)
     if active_project_job is not None:
@@ -2805,6 +2873,28 @@ def process_job_from_ui(
             api_key=cleaned_api_key,
         )
 
+    if launch_mode == "live":
+        db.commit()
+        _run_job_processing(job.id, session.user.id, cleaned_api_key, retry_row_ids, processing_mode="live")
+        db.expire_all()
+        refreshed_job = db.get(Job, job.id)
+        job_label = (refreshed_job.request_file_name if refreshed_job is not None else None) or (job.request_file_name or "job")
+        if refreshed_job is not None and refreshed_job.status == JobStatus.FAILED:
+            return _build_jobs_redirect(
+                error=f"Live processing failed for {job_label}. Review the Jobs page for details.",
+                process_job_id=job.id,
+            )
+        live_message = (
+            f"Finished live retry for {retry_summary['selection_copy']} in {job_label}. "
+            if retry_row_ids
+            else f"Finished live processing for {job_label}. "
+        )
+        if refreshed_job is not None and refreshed_job.status == JobStatus.COMPLETED_WITH_ERRORS:
+            live_message += "Some rows were blocked or failed. Review the Jobs page for details."
+        else:
+            live_message += "Results are now available on the Jobs page."
+        return _build_jobs_redirect(success=live_message)
+
     previous_status = job.status
     job.status = JobStatus.QUEUED
     job.started_at = None
@@ -2828,7 +2918,7 @@ def process_job_from_ui(
         rate_limit_wait_until=None,
         rate_limit_per_minute=resolved_rate_limit,
         retry_scope=str(retry_summary["retry_scope"]) if retry_row_ids else "all_rows",
-        active_row_count=len(retry_row_ids) if retry_row_ids else job.total_rows,
+        active_row_count=active_row_count,
         retry_failed_count=int(retry_summary["failed_count"]) if retry_row_ids else 0,
         retry_unprocessed_count=int(retry_summary["unprocessed_count"]) if retry_row_ids else 0,
     )

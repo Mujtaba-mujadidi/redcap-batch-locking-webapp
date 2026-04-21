@@ -242,7 +242,7 @@
             {% if selected_process_job %}
               {{ selected_process_job.job.request_file_name or "Imported request" }}
             {% else %}
-              Enter the REDCap API key to start background processing.
+              Enter the REDCap API key to start execution.
             {% endif %}
           </p>
         </div>
@@ -256,7 +256,7 @@
         class="modal-body auth-form"
       >
         <div class="modal-note">
-          The API key is stored as an encrypted, session-scoped cache for a short time so you do not need to re-enter it on every step. Once started, the job continues in the background and progress appears on the Jobs page.
+          The API key is stored as an encrypted, session-scoped cache for a short time so you do not need to re-enter it on every step. Small jobs are processed live in this browser session, while larger jobs continue in the background and show progress on the Jobs page.
         </div>
 
         <label class="field">

@@ -17,6 +17,7 @@ class Settings:
     session_cookie_samesite: str = getenv("SESSION_COOKIE_SAMESITE", "lax")
     session_cookie_domain: str | None = getenv("SESSION_COOKIE_DOMAIN") or None
     session_ttl_hours: int = int(getenv("SESSION_TTL_HOURS", "12"))
+    live_processing_max_rows: int = int(getenv("LIVE_PROCESSING_MAX_ROWS", "200"))
     redcap_api_key_cache_ttl_hours: int = int(getenv("REDCAP_API_KEY_CACHE_TTL_HOURS", "2"))
     redcap_api_key_cache_secret: str = getenv("REDCAP_API_KEY_CACHE_SECRET", "")
     redcap_api_key_cache_ephemeral_secret: str = token_urlsafe(32)
