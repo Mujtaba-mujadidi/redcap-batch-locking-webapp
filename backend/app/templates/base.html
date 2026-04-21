@@ -8,5 +8,116 @@
   </head>
   <body>
     {% block content %}{% endblock %}
+    <script>
+      (() => {
+        const sidebarElement = document.querySelector("[data-sidebar]");
+        const sidebarToggleButton = document.getElementById("sidebar-toggle-button");
+        const sidebarMobileToggleButton = document.getElementById("sidebar-mobile-toggle-button");
+        const sidebarMobileBackdrop = document.getElementById("sidebar-mobile-backdrop");
+
+        if (!sidebarElement || !sidebarToggleButton) {
+          return;
+        }
+
+        const storageKey = "redcap-sidebar-collapsed";
+        const desktopSidebarQuery = window.matchMedia("(min-width: 1081px)");
+        let sidebarCollapsed = false;
+        let sidebarMobileOpen = false;
+
+        try {
+          sidebarCollapsed = window.localStorage.getItem(storageKey) === "1";
+        } catch (error) {
+          sidebarCollapsed = false;
+        }
+
+        function applySidebarState() {
+          const canCollapseSidebar = desktopSidebarQuery.matches;
+          const isCollapsed = canCollapseSidebar && sidebarCollapsed;
+          const isMobileOpen = !canCollapseSidebar && sidebarMobileOpen;
+          const nextActionLabel = isCollapsed ? "Expand sidebar" : "Collapse sidebar";
+
+          document.body.classList.toggle("sidebar-collapsed", isCollapsed);
+          document.body.classList.toggle("sidebar-mobile-open", isMobileOpen);
+          sidebarToggleButton.setAttribute("aria-expanded", String(!isCollapsed));
+          sidebarToggleButton.setAttribute("aria-label", nextActionLabel);
+          sidebarToggleButton.setAttribute("title", nextActionLabel);
+
+          if (sidebarMobileToggleButton) {
+            const mobileActionLabel = isMobileOpen ? "Close menu" : "Open menu";
+            sidebarMobileToggleButton.setAttribute("aria-expanded", String(isMobileOpen));
+            sidebarMobileToggleButton.setAttribute("aria-label", mobileActionLabel);
+            sidebarMobileToggleButton.setAttribute("title", mobileActionLabel);
+          }
+
+          if (sidebarMobileBackdrop) {
+            sidebarMobileBackdrop.hidden = !isMobileOpen;
+          }
+        }
+
+        sidebarToggleButton.addEventListener("click", () => {
+          if (!desktopSidebarQuery.matches) {
+            return;
+          }
+
+          sidebarCollapsed = !sidebarCollapsed;
+          try {
+            window.localStorage.setItem(storageKey, sidebarCollapsed ? "1" : "0");
+          } catch (error) {
+            // Ignore storage access issues and keep the in-memory state for this page.
+          }
+          applySidebarState();
+        });
+
+        sidebarMobileToggleButton?.addEventListener("click", () => {
+          if (desktopSidebarQuery.matches) {
+            return;
+          }
+
+          sidebarMobileOpen = !sidebarMobileOpen;
+          applySidebarState();
+        });
+
+        sidebarMobileBackdrop?.addEventListener("click", () => {
+          sidebarMobileOpen = false;
+          applySidebarState();
+        });
+
+        sidebarElement.querySelectorAll(".nav-item[href]").forEach((link) => {
+          link.addEventListener("click", () => {
+            if (!desktopSidebarQuery.matches) {
+              sidebarMobileOpen = false;
+              applySidebarState();
+            }
+          });
+        });
+
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && sidebarMobileOpen) {
+            sidebarMobileOpen = false;
+            applySidebarState();
+          }
+        });
+
+        const handleSidebarMediaChange = () => {
+          if (desktopSidebarQuery.matches) {
+            sidebarMobileOpen = false;
+          }
+          applySidebarState();
+        };
+
+        window.addEventListener("pageshow", () => {
+          sidebarMobileOpen = false;
+          applySidebarState();
+        });
+
+        if (typeof desktopSidebarQuery.addEventListener === "function") {
+          desktopSidebarQuery.addEventListener("change", handleSidebarMediaChange);
+        } else if (typeof desktopSidebarQuery.addListener === "function") {
+          desktopSidebarQuery.addListener(handleSidebarMediaChange);
+        }
+
+        applySidebarState();
+      })();
+    </script>
   </body>
 </html>

@@ -1335,7 +1335,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             action_kind = "link"
             action_hint = "Manual review needed before execution."
             status_tone = "status-review"
-            cancel_label = "Cancel Import"
+            cancel_label = "Cancel Job"
         elif job.status == JobStatus.READY:
             launch_mode = _resolve_processing_mode(row_count=job.total_rows or 0)
             if has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
@@ -1359,7 +1359,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                     f"{progress['rate_limit_copy']}"
                 )
             status_tone = "status-active"
-            cancel_label = "Cancel Import"
+            cancel_label = "Cancel Job"
         elif job.status == JobStatus.QUEUED:
             active_mode = str(progress["mode"])
             action_hint = (
@@ -3045,15 +3045,15 @@ def cancel_job_from_ui(
         return RedirectResponse("/jobs", status_code=303)
 
     if job.status not in USER_CANCELLABLE_JOB_STATUSES:
-        return _build_jobs_redirect(error="Only imported jobs that are still awaiting action can be cancelled.")
+        return _build_jobs_redirect(error="Only jobs that are still awaiting action can be cancelled.")
 
     previous_status = job.status
-    cancellation_message = "Import was cancelled before processing started."
+    cancellation_message = "Job was cancelled before processing started."
     cancelled_count = _mark_unprocessed_rows_as_cancelled(
         db,
         job_id=job.id,
         reason=cancellation_message,
-        message="Row was not processed because the import was cancelled before execution started.",
+        message="Row was not processed because the job was cancelled before execution started.",
     )
     _recalculate_job_rollups(db, job=job)
     job.status = JobStatus.CANCELLED
@@ -3089,7 +3089,7 @@ def cancel_job_from_ui(
         metadata={"previous_status": previous_status.value, "cancelled_rows": cancelled_count},
     )
     db.commit()
-    return _build_jobs_redirect(success=f"Cancelled import for {job.request_file_name or 'job'}.")
+    return _build_jobs_redirect(success=f"Cancelled job for {job.request_file_name or 'job'}.")
 
 
 @router.get("/mappings", response_class=HTMLResponse)

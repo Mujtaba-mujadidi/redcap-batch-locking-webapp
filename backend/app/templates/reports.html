@@ -28,7 +28,7 @@
     .reports-table-controls input,
     .reports-table-controls select {
       min-height: 2.7rem;
-      padding: 0.72rem 0.82rem;
+      padding: 0.72rem 2.45rem 0.72rem 0.82rem;
       border: 1px solid var(--border-strong);
       border-radius: 12px;
       background: #fbfcfe;
@@ -104,6 +104,42 @@
       border: 1px dashed var(--border-strong);
       border-radius: 14px;
       background: #fbfcfe;
+    }
+
+    @media (max-width: 1080px) {
+      .reports-table-controls,
+      .reports-table-footer {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .reports-table-meta,
+      .reports-table-search {
+        width: 100%;
+      }
+
+      .reports-table-controls input {
+        width: 100%;
+        min-width: 0;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .reports-table-meta,
+      .reports-table-search,
+      .reports-pagination {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .reports-page-button {
+        width: 100%;
+        min-width: 0;
+      }
+
+      .reports-table-scroll .data-table {
+        min-width: 760px;
+      }
     }
   </style>
 
