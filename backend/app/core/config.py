@@ -22,6 +22,9 @@ class Settings:
     redcap_api_key_cache_secret: str = getenv("REDCAP_API_KEY_CACHE_SECRET", "")
     redcap_api_key_cache_ephemeral_secret: str = token_urlsafe(32)
     redcap_rate_limit_per_minute_default: int = int(getenv("REDCAP_RATE_LIMIT_PER_MINUTE_DEFAULT", "300"))
+    redis_url: str = getenv("REDIS_URL", "redis://localhost:6379/0")
+    celery_broker_url: str = getenv("CELERY_BROKER_URL") or getenv("REDIS_URL", "redis://localhost:6379/0")
+    celery_result_backend: str = getenv("CELERY_RESULT_BACKEND") or getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
 @lru_cache(maxsize=1)

@@ -119,52 +119,41 @@ def build_mapping_review_bundle(
         instrument_sequence.append(instrument_name)
         form_rows = metadata_by_form.get(instrument_name, [])
         field_catalog = _build_field_catalog(form_rows, export_lookup)
-        form_complete_field = _detect_form_complete_field(field_catalog, instrument_name)
-        complete_index = _field_index(field_catalog, form_complete_field)
-        status_candidates = _score_status_candidates(field_catalog, complete_index, alias_bank)
-        date_candidates = _score_date_candidates(field_catalog, complete_index, alias_bank)
-
-        selected_status = status_candidates[0] if status_candidates else None
-        selected_date = date_candidates[0] if date_candidates else None
-        status_requires_confirmation = _requires_manual_confirmation(status_candidates, value_key="lock_value")
-        date_requires_confirmation = _requires_manual_confirmation(date_candidates, value_key="date_format")
-        confidence = _determine_confidence(
-            status_candidate=selected_status,
-            date_candidate=selected_date,
-            status_requires_confirmation=status_requires_confirmation,
-            date_requires_confirmation=date_requires_confirmation,
+        instrument_reviews[instrument_name] = _build_instrument_review(
+            instrument_name=instrument_name,
+            instrument_label=instrument_label_lookup.get(instrument_name) or instrument_name,
+            field_catalog=field_catalog,
+            alias_bank=alias_bank,
         )
 
-        notes: list[str] = []
-        if status_requires_confirmation and not status_candidates:
-            notes.append("No strong lock status field candidate was found.")
-        elif status_requires_confirmation and selected_status and not selected_status.get("lock_value"):
-            notes.append("A lock status field was detected, but its lock value needs confirmation.")
-        elif status_requires_confirmation:
-            notes.append("More than one lock status field looks plausible. Confirm which field to use.")
-        if date_requires_confirmation and not date_candidates:
-            notes.append("No strong lock date field candidate was found.")
-        elif date_requires_confirmation and selected_date and not selected_date.get("date_format"):
-            notes.append("A lock date field was detected, but its date format needs confirmation.")
-        elif date_requires_confirmation:
-            notes.append("More than one lock date field looks plausible. Confirm which field to use.")
+    return {
+        "instrument_sequence": instrument_sequence,
+        "instrument_reviews": instrument_reviews,
+    }
 
-        instrument_reviews[instrument_name] = {
-            "instrument_name": instrument_name,
-            "instrument_label": instrument_label_lookup.get(instrument_name) or instrument_name,
-            "form_complete_field_name": form_complete_field["field_name"] if form_complete_field else None,
-            "form_complete_field_label": form_complete_field["field_label"] if form_complete_field else None,
-            "field_catalog": field_catalog,
-            "status_candidates": status_candidates,
-            "date_candidates": date_candidates,
-            "selected_status_candidate": selected_status,
-            "selected_date_candidate": selected_date,
-            "confidence": confidence,
-            "status_requires_confirmation": status_requires_confirmation,
-            "date_requires_confirmation": date_requires_confirmation,
-            "requires_confirmation": status_requires_confirmation or date_requires_confirmation,
-            "notes": notes,
-        }
+
+def refresh_mapping_review_bundle(
+    validation_summary: dict[str, Any],
+    *,
+    alias_bank: dict[str, list[str]],
+) -> dict[str, Any]:
+    instrument_sequence = validation_summary.get("instrument_sequence", [])
+    stored_reviews = validation_summary.get("instrument_reviews", {})
+    instrument_reviews: dict[str, dict[str, Any]] = {}
+
+    for instrument_name in instrument_sequence:
+        review = stored_reviews.get(instrument_name)
+        if not isinstance(review, dict):
+            continue
+        field_catalog = review.get("field_catalog")
+        if not isinstance(field_catalog, list):
+            continue
+        instrument_reviews[instrument_name] = _build_instrument_review(
+            instrument_name=instrument_name,
+            instrument_label=str(review.get("instrument_label") or instrument_name),
+            field_catalog=field_catalog,
+            alias_bank=alias_bank,
+        )
 
     return {
         "instrument_sequence": instrument_sequence,
@@ -196,15 +185,20 @@ def resolve_status_field_configuration(
         return configuration
 
     if field_type == "checkbox":
-        export_field_names = field_definition.get("export_field_names") or []
-        if not export_field_names:
+        checkbox_exports = _extract_checkbox_choice_exports(field_definition)
+        choice_defined_exports = _filter_exports_to_defined_choice_codes(
+            checkbox_exports,
+            field_definition.get("choices") or [],
+        )
+        candidate_exports = choice_defined_exports or checkbox_exports
+        if not checkbox_exports:
             raise ValueError("Checkbox fields require an export field name to be writable.")
 
         if manual_lock_value:
             matching_export = next(
                 (
                     item
-                    for item in export_field_names
+                    for item in candidate_exports
                     if str(item.get("choice_value") or "") == manual_lock_value
                     or str(item.get("export_field_name") or "") == manual_lock_value
                 ),
@@ -212,8 +206,8 @@ def resolve_status_field_configuration(
             )
             if matching_export is None:
                 raise ValueError("Manual checkbox lock value did not match any checkbox choice.")
-        elif len(export_field_names) == 1:
-            matching_export = export_field_names[0]
+        elif len(candidate_exports) == 1:
+            matching_export = candidate_exports[0]
         else:
             positive_choice = _detect_positive_choice(
                 field_definition.get("choices") or [],
@@ -222,7 +216,7 @@ def resolve_status_field_configuration(
             matching_export = next(
                 (
                     item
-                    for item in export_field_names
+                    for item in candidate_exports
                     if str(item.get("choice_value") or "") == str(positive_choice or "")
                 ),
                 None,
@@ -305,12 +299,13 @@ def _build_export_field_lookup(export_field_name_rows: list[dict[str, Any]]) -> 
         original_field_name = str(row.get("original_field_name") or "").strip()
         if not original_field_name:
             continue
-        lookup.setdefault(original_field_name, []).append(
-            {
-                "choice_value": str(row.get("choice_value") or "").strip(),
-                "export_field_name": str(row.get("export_field_name") or "").strip(),
-            }
-        )
+        export_item = {
+            "choice_value": str(row.get("choice_value") or "").strip(),
+            "export_field_name": str(row.get("export_field_name") or "").strip(),
+        }
+        existing_items = lookup.setdefault(original_field_name, [])
+        if export_item not in existing_items:
+            existing_items.append(export_item)
     return lookup
 
 
@@ -363,6 +358,46 @@ def _detect_form_complete_field(field_catalog: list[dict[str, Any]], instrument_
     }
 
 
+def _extract_checkbox_choice_exports(field_definition: dict[str, Any]) -> list[dict[str, str]]:
+    checkbox_exports: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in field_definition.get("export_field_names") or []:
+        choice_value = str(item.get("choice_value") or "").strip()
+        export_field_name = str(item.get("export_field_name") or "").strip()
+        if not choice_value and "___" not in export_field_name:
+            continue
+
+        key = (choice_value, export_field_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        checkbox_exports.append(
+            {
+                "choice_value": choice_value,
+                "export_field_name": export_field_name,
+            }
+        )
+    return checkbox_exports
+
+
+def _filter_exports_to_defined_choice_codes(
+    checkbox_exports: list[dict[str, str]],
+    choices: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    defined_choice_codes = {
+        str(choice.get("code") or "").strip()
+        for choice in choices
+        if str(choice.get("code") or "").strip()
+    }
+    if not defined_choice_codes:
+        return []
+    return [
+        export_item
+        for export_item in checkbox_exports
+        if str(export_item.get("choice_value") or "").strip() in defined_choice_codes
+    ]
+
+
 def _field_index(field_catalog: list[dict[str, Any]], field_definition: dict[str, Any] | None) -> int | None:
     if field_definition is None:
         return None
@@ -394,7 +429,15 @@ def _score_status_candidates(
 
         lock_value = None
         try:
-            lock_value = resolve_status_field_configuration(field_definition, alias_bank)["lock_value"]
+            status_configuration = resolve_status_field_configuration(field_definition, alias_bank)
+            if str(status_configuration.get("mode") or "").strip().lower() == "checkbox":
+                lock_value = str(
+                    status_configuration.get("choice_value")
+                    or status_configuration.get("export_field_name")
+                    or ""
+                ).strip() or None
+            else:
+                lock_value = str(status_configuration.get("lock_value") or "").strip() or None
         except ValueError:
             pass
 
@@ -450,22 +493,81 @@ def _score_date_candidates(
     return sorted(candidates, key=lambda item: (-item["score"], item["field_name"]))[:5]
 
 
+def _build_instrument_review(
+    *,
+    instrument_name: str,
+    instrument_label: str,
+    field_catalog: list[dict[str, Any]],
+    alias_bank: dict[str, list[str]],
+) -> dict[str, Any]:
+    form_complete_field = _detect_form_complete_field(field_catalog, instrument_name)
+    complete_index = _field_index(field_catalog, form_complete_field)
+    status_candidates = _score_status_candidates(field_catalog, complete_index, alias_bank)
+    date_candidates = _score_date_candidates(field_catalog, complete_index, alias_bank)
+
+    selected_status = status_candidates[0] if status_candidates else None
+    selected_date = date_candidates[0] if date_candidates else None
+    status_requires_confirmation = _requires_manual_confirmation(status_candidates, value_key="lock_value")
+    date_requires_confirmation = _requires_manual_confirmation(date_candidates, value_key="date_format")
+    confidence = _determine_confidence(
+        status_candidate=selected_status,
+        date_candidate=selected_date,
+        status_requires_confirmation=status_requires_confirmation,
+        date_requires_confirmation=date_requires_confirmation,
+    )
+
+    return {
+        "instrument_name": instrument_name,
+        "instrument_label": instrument_label,
+        "form_complete_field_name": form_complete_field["field_name"] if form_complete_field else None,
+        "form_complete_field_label": form_complete_field["field_label"] if form_complete_field else None,
+        "field_catalog": field_catalog,
+        "status_candidates": status_candidates,
+        "date_candidates": date_candidates,
+        "selected_status_candidate": selected_status,
+        "selected_date_candidate": selected_date,
+        "confidence": confidence,
+        "status_requires_confirmation": status_requires_confirmation,
+        "date_requires_confirmation": date_requires_confirmation,
+        "requires_confirmation": status_requires_confirmation or date_requires_confirmation,
+        "notes": _build_review_notes(
+            status_candidates=status_candidates,
+            date_candidates=date_candidates,
+            selected_status=selected_status,
+            selected_date=selected_date,
+            status_requires_confirmation=status_requires_confirmation,
+            date_requires_confirmation=date_requires_confirmation,
+        ),
+    }
+
+
 def _alias_score(field_definition: dict[str, Any], aliases: list[str]) -> int:
     haystack_parts = [
         normalize_alias(field_definition.get("field_name") or ""),
         normalize_alias(field_definition.get("field_label") or ""),
     ]
     haystack_parts.extend(normalize_alias(choice.get("label") or "") for choice in field_definition.get("choices", []))
-    haystack = " ".join(part for part in haystack_parts if part)
+    haystack_tokens = [part.split() for part in haystack_parts if part]
 
     best_score = 0
     for alias in aliases:
         normalized_alias = normalize_alias(alias)
         if not normalized_alias:
             continue
-        if normalized_alias in haystack:
+        alias_tokens = normalized_alias.split()
+        if any(_contains_alias_tokens(tokens, alias_tokens) for tokens in haystack_tokens):
             best_score = max(best_score, 18 + 4 * len(normalized_alias.split()))
     return best_score
+
+
+def _contains_alias_tokens(haystack_tokens: list[str], alias_tokens: list[str]) -> bool:
+    if not haystack_tokens or not alias_tokens or len(alias_tokens) > len(haystack_tokens):
+        return False
+    alias_length = len(alias_tokens)
+    for start_index in range(len(haystack_tokens) - alias_length + 1):
+        if haystack_tokens[start_index : start_index + alias_length] == alias_tokens:
+            return True
+    return False
 
 
 def _proximity_score(field_definition: dict[str, Any], complete_index: int | None) -> int:
@@ -503,6 +605,31 @@ def _determine_confidence(
     if status_candidate or date_candidate:
         return "confirm"
     return "not_found"
+
+
+def _build_review_notes(
+    *,
+    status_candidates: list[dict[str, Any]],
+    date_candidates: list[dict[str, Any]],
+    selected_status: dict[str, Any] | None,
+    selected_date: dict[str, Any] | None,
+    status_requires_confirmation: bool,
+    date_requires_confirmation: bool,
+) -> list[str]:
+    notes: list[str] = []
+    if status_requires_confirmation and not status_candidates:
+        notes.append("No strong lock status field candidate was found.")
+    elif status_requires_confirmation and selected_status and not selected_status.get("lock_value"):
+        notes.append("A lock status field was detected, but its lock value needs confirmation.")
+    elif status_requires_confirmation:
+        notes.append("More than one lock status field looks plausible. Confirm which field to use.")
+    if date_requires_confirmation and not date_candidates:
+        notes.append("No strong lock date field candidate was found.")
+    elif date_requires_confirmation and selected_date and not selected_date.get("date_format"):
+        notes.append("A lock date field was detected, but its date format needs confirmation.")
+    elif date_requires_confirmation:
+        notes.append("More than one lock date field looks plausible. Confirm which field to use.")
+    return notes
 
 
 def _requires_manual_confirmation(candidates: list[dict[str, Any]], *, value_key: str) -> bool:

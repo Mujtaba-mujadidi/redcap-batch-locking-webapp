@@ -22,7 +22,7 @@ The repository now includes:
 - Project-scoped REDCap API rate limiting with visible wait/resume messaging
 - CSV report generation and export for completed, partial-error, and failed jobs
 - Session-scoped encrypted REDCap API key cache so repeat processing in the same session does not always prompt again
-- Docker Compose for API + PostgreSQL
+- Docker Compose for API + PostgreSQL + Redis + Celery worker scaffold
 
 ## Implemented snapshot
 
@@ -38,8 +38,8 @@ As of 15 April 2026, the app supports the following end-to-end workflow:
 
 ## Current gaps / next major work
 
-- Background execution currently uses in-process worker threads, not Celery/Redis yet.
-- There is no true distributed worker queue or resumable worker infrastructure yet.
+- Background execution now runs through Celery + Redis instead of in-process threads.
+- Active cancellation now exists for queued/running jobs, but there is still no resume/restart-in-place flow for interrupted work.
 - The UI is still FastAPI/Jinja based; the planned Next.js frontend is not built.
 - Automated test coverage is still limited.
 
@@ -48,16 +48,30 @@ As of 15 April 2026, the app supports the following end-to-end workflow:
 Backend lives in `backend/` (FastAPI). Run:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres redis
 
 cd backend
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 export DATABASE_URL=postgresql+psycopg://redcap_app:redcap_app@localhost:5432/redcap_batch_locking
+export REDIS_URL=redis://localhost:6379/0
+export CELERY_BROKER_URL=$REDIS_URL
+export CELERY_RESULT_BACKEND=$REDIS_URL
+export REDCAP_API_KEY_CACHE_SECRET=local-dev-redcap-api-key-cache-secret
 ./scripts/migrate.sh
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Run the Celery worker in a second terminal when working outside Docker:
+
+```bash
+cd backend
+source .venv/bin/activate
+celery -A app.workers.celery_app.celery_app worker --loglevel=info --queues=redcap_jobs
+```
+
+Use the same `REDCAP_API_KEY_CACHE_SECRET` value for both the API process and the worker. The worker does not receive the raw REDCap API key on the queue; it reloads the encrypted session-scoped cache instead.
 
 - App: **http://127.0.0.1:8000/** — redirects to the login UI
 - Login: **http://127.0.0.1:8000/login**
@@ -133,3 +147,5 @@ For production, the normal setup flow will be:
 4. Start the API service.
 
 This means yes: there is now a repeatable migration command for setting up backend tables, and Alembic will handle future schema upgrades safely.
+
+For multi-process or Docker deployments, also set a shared `REDCAP_API_KEY_CACHE_SECRET` for both the API and worker services so background jobs can safely decrypt the short-lived cached REDCap API key.

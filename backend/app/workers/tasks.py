@@ -1,0 +1,59 @@
+from uuid import UUID
+
+from app.workers.celery_app import celery_app
+
+
+def enqueue_job_processing(
+    *,
+    job_id: UUID,
+    actor_user_id: UUID,
+    user_session_id: UUID,
+    retry_row_ids: list[UUID] | None = None,
+    task_id: str | None = None,
+):
+    """Queue background job execution on the Celery worker."""
+
+    return process_job.apply_async(
+        kwargs={
+            "job_id": str(job_id),
+            "actor_user_id": str(actor_user_id),
+            "user_session_id": str(user_session_id),
+            "retry_row_ids": [str(row_id) for row_id in (retry_row_ids or [])],
+        },
+        task_id=task_id,
+    )
+
+
+def revoke_job_processing(task_id: str) -> None:
+    """Best-effort revoke for a queued worker task."""
+
+    celery_app.control.revoke(task_id)
+
+
+@celery_app.task(name="app.workers.tasks.ping")
+def ping() -> str:
+    """Small smoke-test task for validating the worker/Redis scaffold."""
+
+    return "pong"
+
+
+@celery_app.task(name="app.workers.tasks.process_job")
+def process_job(
+    *,
+    job_id: str,
+    actor_user_id: str,
+    user_session_id: str,
+    retry_row_ids: list[str] | None = None,
+) -> None:
+    """Run a queued job on the Celery worker."""
+
+    from app.ui.router import run_job_processing
+
+    run_job_processing(
+        UUID(job_id),
+        UUID(actor_user_id),
+        "",
+        [UUID(row_id) for row_id in (retry_row_ids or [])],
+        processing_mode="background",
+        user_session_id=UUID(user_session_id),
+    )

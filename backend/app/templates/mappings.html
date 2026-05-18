@@ -8,16 +8,36 @@
       <div class="content-column">
         <section class="workspace-hero workspace-hero-actions">
           <div>
-            <p class="mini-label">Mapping Review</p>
+            <p class="mini-label">Step 2 of 3</p>
             <h1 class="section-title">Review REDCap form mappings</h1>
-            {% if job %}
-              <p class="section-subtitle">
-                {{ job.redcap_project_title or "Untitled project" }}{% if job.redcap_project_id %} · Project {{ job.redcap_project_id }}{% endif %}
-              </p>
-            {% endif %}
+            <p class="section-subtitle">
+              Mapping Review
+              {% if job %}
+                · {{ job.redcap_project_title or "Untitled project" }}{% if job.redcap_project_id %} · Project {{ job.redcap_project_id }}{% endif %}
+              {% endif %}
+            </p>
           </div>
           <div class="toolbar-actions">
-            <a class="header-action" href="/jobs">Back to Jobs</a>
+            <details class="job-action-menu">
+              <summary class="manage-button">Action</summary>
+              <div class="job-action-menu-list">
+                {% if job and job.status.value == "awaiting_mapping_confirmation" %}
+                  <form
+                    action="/mappings/{{ job.id }}/refresh"
+                    method="post"
+                    class="job-action-menu-form"
+                    data-progress-submit
+                    data-progress-title="Refreshing mapping options"
+                    data-progress-copy="Fetching the latest REDCap metadata and rebuilding the field matches for this job."
+                    data-progress-stages="Connecting to REDCap|Loading project metadata|Rebuilding mapping options|Refreshing this page"
+                  >
+                    <input type="hidden" name="return_to" value="mappings" />
+                    <button type="submit" class="job-action-menu-button">Refresh Options</button>
+                  </form>
+                {% endif %}
+                <a class="job-action-menu-link" href="/jobs">Back to Jobs</a>
+              </div>
+            </details>
           </div>
         </section>
 
@@ -65,12 +85,7 @@
                       <p class="mini-label">{{ row.review.instrument_name }}</p>
                       <h3>{{ row.review.instrument_label }}</h3>
                       <p class="compact-copy">
-                        Complete field:
-                        {% if row.review.form_complete_field_name %}
-                          <span class="mono">{{ row.review.form_complete_field_name }}</span>
-                        {% else %}
-                          Not identified automatically
-                        {% endif %}
+                        Form completion always uses <span class="mono">{{ row.review.instrument_name }}_complete</span>.
                       </p>
                     </div>
                     <span class="status-pill {% if row.mapping.confidence.value == 'high' %}status-active{% elif row.mapping.confidence.value == 'confirm' %}status-review{% else %}status-inactive{% endif %}">
@@ -105,18 +120,6 @@
                         </tr>
                       </thead>
                       <tbody>
-                        <tr>
-                          <td>
-                            <strong>Form complete field</strong>
-                            <p class="compact-copy">Always uses the REDCap form complete field.</p>
-                          </td>
-                          <td>
-                            <span class="mono">{{ row.review.form_complete_field_name }}</span>
-                          </td>
-                          <td colspan="4" class="mapping-fixed-cell">
-                            <span class="compact-copy">Fixed to <span class="mono">{{ row.review.instrument_name }}_complete</span></span>
-                          </td>
-                        </tr>
                         <tr>
                           <td><strong>Lock status field</strong></td>
                           <td>
@@ -167,6 +170,9 @@
                               value="{{ row.selected_status_lock_value }}"
                               class="mapping-cell-input"
                             />
+                            {% if row.selected_status_value_help %}
+                              <p class="mapping-input-help">{{ row.selected_status_value_help }}</p>
+                            {% endif %}
                           </td>
                         </tr>
                         <tr>
@@ -253,8 +259,40 @@
     </main>
   </div>
 
+  <div id="mapping-refresh-overlay" class="progress-overlay" hidden>
+    <div class="progress-dialog" role="status" aria-live="polite" aria-atomic="true">
+      <div class="progress-heading">
+        <span class="loader-spinner" aria-hidden="true"></span>
+        <div>
+          <p class="mini-label">Refreshing Metadata</p>
+          <h3 id="mapping-refresh-title">Refreshing mapping options</h3>
+        </div>
+      </div>
+      <p id="mapping-refresh-copy" class="compact-copy">
+        Fetching the latest REDCap metadata and rebuilding the field matches for this job.
+      </p>
+
+      <div class="progress-meter" aria-hidden="true">
+        <div id="mapping-refresh-fill" class="progress-meter-fill"></div>
+      </div>
+
+      <p id="mapping-refresh-stage" class="progress-stage-copy">Preparing the next step...</p>
+      <p class="compact-copy progress-mode-copy">
+        REDCap refresh: Keep this page open while the latest metadata and mapping options are loaded.
+      </p>
+    </div>
+  </div>
+
   <script>
     const logoutButton = document.getElementById("logout-button");
+    const mappingRefreshOverlay = document.getElementById("mapping-refresh-overlay");
+    const mappingRefreshTitle = document.getElementById("mapping-refresh-title");
+    const mappingRefreshCopy = document.getElementById("mapping-refresh-copy");
+    const mappingRefreshFill = document.getElementById("mapping-refresh-fill");
+    const mappingRefreshStage = document.getElementById("mapping-refresh-stage");
+    const progressForms = Array.from(document.querySelectorAll("[data-progress-submit]"));
+    let progressStageTimer = null;
+    let progressFillTimer = null;
 
     logoutButton.addEventListener("click", async () => {
       logoutButton.disabled = true;
@@ -268,6 +306,74 @@
       } finally {
         window.location.assign("/login");
       }
+    });
+
+    function clearProgressTimers() {
+      if (progressStageTimer) {
+        window.clearInterval(progressStageTimer);
+        progressStageTimer = null;
+      }
+      if (progressFillTimer) {
+        window.clearInterval(progressFillTimer);
+        progressFillTimer = null;
+      }
+    }
+
+    function setButtonsBusy(form) {
+      form.querySelectorAll("button").forEach((button) => {
+        button.disabled = true;
+        button.setAttribute("aria-disabled", "true");
+      });
+    }
+
+    function showSubmissionProgress(form) {
+      if (!mappingRefreshOverlay || !mappingRefreshTitle || !mappingRefreshCopy || !mappingRefreshFill || !mappingRefreshStage) {
+        return;
+      }
+
+      const stages = (form.dataset.progressStages || "")
+        .split("|")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      let stageIndex = 0;
+      let progressValue = 12;
+
+      clearProgressTimers();
+      mappingRefreshTitle.textContent = form.dataset.progressTitle || "Refreshing mapping options";
+      mappingRefreshCopy.textContent =
+        form.dataset.progressCopy || "Fetching the latest REDCap metadata and rebuilding the field matches for this job.";
+      mappingRefreshStage.textContent = stages[0] || "Preparing request";
+      mappingRefreshFill.style.width = `${progressValue}%`;
+      mappingRefreshOverlay.hidden = false;
+      document.body.classList.add("modal-open", "progress-open");
+
+      if (stages.length > 1) {
+        progressStageTimer = window.setInterval(() => {
+          if (stageIndex < stages.length - 1) {
+            stageIndex += 1;
+          }
+          mappingRefreshStage.textContent = stages[stageIndex];
+        }, 2400);
+      }
+
+      progressFillTimer = window.setInterval(() => {
+        const cap = stageIndex >= Math.max(stages.length - 1, 0) ? 86 : 92;
+        progressValue = Math.min(progressValue + 5, cap);
+        mappingRefreshFill.style.width = `${progressValue}%`;
+      }, 700);
+    }
+
+    progressForms.forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        if (form.dataset.submitting === "true") {
+          event.preventDefault();
+          return;
+        }
+
+        form.dataset.submitting = "true";
+        setButtonsBusy(form);
+        showSubmissionProgress(form);
+      });
     });
   </script>
 {% endblock %}

@@ -5,10 +5,9 @@ from io import StringIO
 import json
 from pathlib import Path
 import re
-from threading import Lock, Thread
 from time import perf_counter
 from urllib.parse import urlencode, urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -32,6 +31,7 @@ from app.services.mappings import (
     DATE_FORMAT_OPTIONS,
     build_mapping_review_bundle,
     get_mapping_label_aliases,
+    refresh_mapping_review_bundle,
     resolve_date_field_configuration,
     resolve_status_field_configuration,
     save_mapping_label_aliases,
@@ -66,6 +66,7 @@ from app.services.users import (
     set_user_active_state,
     set_user_role,
 )
+from app.workers.tasks import enqueue_job_processing, revoke_job_processing
 
 
 settings = get_settings()
@@ -100,12 +101,14 @@ JOBS_VISIBLE_STATUSES = (
     JobStatus.QUEUED,
     JobStatus.RUNNING,
     JobStatus.WAITING_DUE_TO_RATE_LIMIT,
+    JobStatus.CANCEL_REQUESTED,
     JobStatus.CANCELLED,
     JobStatus.COMPLETED,
     JobStatus.COMPLETED_WITH_ERRORS,
     JobStatus.FAILED,
 )
 REPORTABLE_JOB_STATUSES = {
+    JobStatus.CANCELLED,
     JobStatus.COMPLETED,
     JobStatus.COMPLETED_WITH_ERRORS,
     JobStatus.FAILED,
@@ -114,13 +117,18 @@ ACTIVE_JOB_STATUSES = {
     JobStatus.QUEUED,
     JobStatus.RUNNING,
     JobStatus.WAITING_DUE_TO_RATE_LIMIT,
+    JobStatus.CANCEL_REQUESTED,
 }
-USER_CANCELLABLE_JOB_STATUSES = {
+PRESTART_CANCELLABLE_JOB_STATUSES = {
     JobStatus.AWAITING_MAPPING_CONFIRMATION,
     JobStatus.READY,
+    JobStatus.QUEUED,
 }
-_background_job_threads_lock = Lock()
-_background_job_threads: dict[UUID, Thread] = {}
+USER_CANCELLABLE_JOB_STATUSES = {
+    *PRESTART_CANCELLABLE_JOB_STATUSES,
+    JobStatus.RUNNING,
+    JobStatus.WAITING_DUE_TO_RATE_LIMIT,
+}
 REQUEST_TEMPLATE_COLUMNS = (
     {
         "name": "record_id",
@@ -258,6 +266,209 @@ def _build_mappings_redirect(
     return RedirectResponse(f"/mappings?{urlencode(params)}", status_code=303)
 
 
+def _is_mapping_refresh_prompt_pending(job: Job) -> bool:
+    options = job.options_json if isinstance(job.options_json, dict) else {}
+    return bool(options.get("mapping_refresh_prompt_pending"))
+
+
+def _get_mapping_refresh_continue_status(job: Job) -> JobStatus:
+    options = job.options_json if isinstance(job.options_json, dict) else {}
+    raw_status = str(options.get("mapping_refresh_continue_status") or "").strip()
+    if raw_status:
+        try:
+            return JobStatus(raw_status)
+        except ValueError:
+            pass
+    return JobStatus.READY if not options.get("mapping_review_required") else JobStatus.AWAITING_MAPPING_CONFIRMATION
+
+
+def _clear_mapping_refresh_prompt(job: Job) -> None:
+    options = dict(job.options_json) if isinstance(job.options_json, dict) else {}
+    options.pop("mapping_refresh_prompt_pending", None)
+    options.pop("mapping_refresh_continue_status", None)
+    options.pop("mapping_refresh_confirmed_instrument_count", None)
+    options.pop("mapping_refresh_confirmed_instruments", None)
+    job.options_json = options
+
+
+def _refresh_job_mapping_review(
+    db: Session,
+    *,
+    job: Job,
+    user_session_id: UUID,
+) -> int:
+    if not isinstance(job.validation_summary_json, dict) or not job.redcap_project_id:
+        raise ValueError("This job does not have a stored mapping review bundle.")
+    if job.redcap_host_id is None:
+        raise ValueError("This job is not linked to a REDCap host configuration.")
+
+    cleaned_api_key = get_cached_redcap_api_key(
+        db,
+        user_session_id=user_session_id,
+        redcap_host_id=job.redcap_host_id,
+    )
+    if not cleaned_api_key:
+        raise ValueError(
+            "A valid REDCap API key is required to refresh mapping options. "
+            "Re-import the request or start processing from the Jobs page after entering the API key again."
+        )
+
+    resolved_rate_limit = set_redcap_rate_limit_for_scope(
+        job.redcap_api_url,
+        _resolve_job_rate_limit(job),
+        job.redcap_project_id,
+    )
+    with redcap_rate_limit_scope(job.redcap_api_url, job.redcap_project_id):
+        preflight_bundle = fetch_redcap_preflight_bundle(job.redcap_api_url, cleaned_api_key)
+    if not preflight_bundle["locking_api_available"]:
+        reason = preflight_bundle["locking_api_probe"]["reason"]
+        raise ValueError(f"locking_api is not enabled or not reachable for this REDCap project. {reason}")
+
+    project_info = preflight_bundle["project_info"]
+    refreshed_project_id = str(project_info.get("project_id") or "").strip()
+    if not refreshed_project_id:
+        raise ValueError("REDCap project information did not include a project_id during refresh.")
+    if job.redcap_project_id and refreshed_project_id != job.redcap_project_id:
+        raise ValueError(
+            "The refreshed REDCap API key points to a different REDCap project than this job. "
+            "Use the correct project API key and try again."
+        )
+
+    rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job.id).order_by(JobRow.row_number)).all())
+    if not rows:
+        raise ValueError("This job does not contain any request rows to remap.")
+
+    instrument_lookup = {
+        str(item.get("instrument_name") or ""): item for item in preflight_bundle["instruments"] if item.get("instrument_name")
+    }
+    lower_instrument_lookup = {key.lower(): key for key in instrument_lookup}
+    missing_instruments: list[str] = []
+    for row in rows:
+        canonical_instrument_name = instrument_lookup.get(row.target_instrument)
+        if canonical_instrument_name is None:
+            lowered_match = lower_instrument_lookup.get(row.target_instrument.lower())
+            if lowered_match is None:
+                missing_instruments.append(row.target_instrument)
+                continue
+            row.target_instrument = lowered_match
+
+    if missing_instruments:
+        raise ValueError(
+            "The stored request references instrument names that were not found in REDCap anymore: "
+            f"{', '.join(sorted(set(missing_instruments)))}."
+        )
+
+    target_instruments = _extract_target_instruments(
+        [
+            {"target_instrument": row.target_instrument}
+            for row in rows
+        ]
+    )
+
+    alias_bank = get_mapping_label_aliases(db)
+    refreshed_bundle = build_mapping_review_bundle(
+        instrument_rows=preflight_bundle["instruments"],
+        metadata_rows=preflight_bundle["metadata"],
+        export_field_name_rows=preflight_bundle["export_field_names"],
+        target_instruments=target_instruments,
+        alias_bank=alias_bank,
+    )
+    instrument_sequence = refreshed_bundle.get("instrument_sequence", [])
+    instrument_reviews = refreshed_bundle.get("instrument_reviews", {})
+    if not instrument_sequence or not instrument_reviews:
+        raise ValueError("This job does not have a stored mapping review bundle.")
+
+    now = utc_now()
+    existing_mappings = {
+        mapping.instrument_name: mapping
+        for mapping in db.scalars(
+            select(InstrumentMapping).where(
+                InstrumentMapping.redcap_host_id == job.redcap_host_id,
+                InstrumentMapping.redcap_project_id == job.redcap_project_id,
+                InstrumentMapping.instrument_name.in_(instrument_sequence),
+            )
+        ).all()
+    }
+
+    for instrument_name in instrument_sequence:
+        review = instrument_reviews.get(instrument_name)
+        if not isinstance(review, dict):
+            continue
+
+        mapping = existing_mappings.get(instrument_name)
+        field_names = {
+            str(field.get("field_name") or "")
+            for field in review.get("field_catalog", [])
+            if isinstance(field, dict) and field.get("field_name")
+        }
+        existing_mapping_was_stale = False
+
+        if mapping is None:
+            mapping = InstrumentMapping(
+                redcap_host_id=job.redcap_host_id,
+                redcap_project_id=job.redcap_project_id,
+                instrument_name=instrument_name,
+            )
+            db.add(mapping)
+            _apply_inferred_mapping_defaults(mapping, review)
+        elif mapping.status == MappingStatus.CONFIRMED and _mapping_fields_exist(mapping, field_names):
+            if not mapping.form_complete_field_name:
+                mapping.form_complete_field_name = _expected_form_complete_field_name(instrument_name)
+            mapping.last_validated_at = now
+        else:
+            if mapping.status == MappingStatus.CONFIRMED:
+                mapping.drift_detected_at = now
+                existing_mapping_was_stale = True
+            _apply_inferred_mapping_defaults(mapping, review)
+            if existing_mapping_was_stale and mapping.confidence != MappingConfidence.HIGH:
+                mapping.status = MappingStatus.STALE
+
+        if mapping.last_validated_at is None:
+            mapping.last_validated_at = now
+        review["requires_confirmation"] = mapping.status != MappingStatus.CONFIRMED and mapping.confidence != MappingConfidence.HIGH
+
+    review_instrument_count = sum(
+        1 for instrument_name in instrument_sequence if instrument_reviews.get(instrument_name, {}).get("requires_confirmation")
+    )
+    validation_summary = dict(job.validation_summary_json)
+    validation_summary["project_info"] = project_info
+    validation_summary["locking_api_available"] = preflight_bundle["locking_api_available"]
+    validation_summary["locking_api_listed"] = preflight_bundle["locking_api_listed"]
+    validation_summary["locking_api_probe"] = preflight_bundle["locking_api_probe"]
+    validation_summary["instrument_sequence"] = instrument_sequence
+    validation_summary["instrument_reviews"] = instrument_reviews
+    job.validation_summary_json = validation_summary
+
+    options = job.options_json if isinstance(job.options_json, dict) else {}
+    options["mapping_review_required"] = review_instrument_count > 0
+    options["mapping_review_instrument_count"] = review_instrument_count
+    job.options_json = options
+    _clear_mapping_refresh_prompt(job)
+    job.redcap_project_id = refreshed_project_id
+    job.redcap_project_title = str(project_info.get("project_title") or "").strip() or None
+    job.status = JobStatus.AWAITING_MAPPING_CONFIRMATION if review_instrument_count else JobStatus.READY
+    if review_instrument_count == 0:
+        job.last_error_summary = None
+    _set_job_runtime_state(
+        job,
+        rate_limit_per_minute=resolved_rate_limit,
+    )
+
+    return review_instrument_count
+
+
+def _continue_job_with_existing_mappings(job: Job) -> JobStatus:
+    if not _is_mapping_refresh_prompt_pending(job):
+        raise ValueError("This job does not need a mapping refresh decision.")
+
+    continue_status = _get_mapping_refresh_continue_status(job)
+    _clear_mapping_refresh_prompt(job)
+    job.status = continue_status
+    if continue_status == JobStatus.READY:
+        job.last_error_summary = None
+    return continue_status
+
+
 def _contains_control_characters(value: str, *, allow_newlines: bool = False) -> bool:
     allowed_controls = {"\t"}
     if allow_newlines:
@@ -342,13 +553,14 @@ def _sanitize_csv_cell(
     row_index: int,
     column_name: str,
     repair_control_characters: bool = False,
+    max_length: int | None = MAX_CSV_CELL_LENGTH,
 ) -> str:
     cleaned_value = (
         _strip_unsupported_control_characters(value)
         if repair_control_characters
         else value
     ).strip()
-    if len(cleaned_value) > MAX_CSV_CELL_LENGTH:
+    if max_length is not None and len(cleaned_value) > max_length:
         raise ValueError(f"Row {row_index} has a value that is too long in {column_name}.")
 
     if _contains_control_characters(cleaned_value):
@@ -496,7 +708,10 @@ def _extract_query_field_name(field_value: str, *, row_index: int) -> str:
     match = re.match(r"([A-Za-z0-9_]+)", field_value.strip())
     if match is None:
         raise ValueError(f"Could not parse the REDCap field name from the existing queries CSV at row {row_index}.")
-    return match.group(1)
+    field_name = match.group(1)
+    if len(field_name) > MAX_CSV_CELL_LENGTH:
+        raise ValueError(f"Row {row_index} has a value that is too long in Field.")
+    return field_name
 
 
 def _parse_optional_positive_int(value: str, *, row_index: int, label: str) -> int | None:
@@ -604,6 +819,7 @@ def _inspect_queries_import_file(
                 row_index=row_index,
                 column_name=normalized_header[index] if index < len(normalized_header) else column_name,
                 repair_control_characters=True,
+                max_length=None if column_name == "field" else MAX_CSV_CELL_LENGTH,
             )
             for column_name, index in query_column_indexes.items()
         }
@@ -735,9 +951,7 @@ def _expected_form_complete_field_name(instrument_name: str) -> str:
 def _apply_inferred_mapping_defaults(mapping: InstrumentMapping, review: dict[str, object]) -> None:
     selected_status = review.get("selected_status_candidate") or {}
     selected_date = review.get("selected_date_candidate") or {}
-    mapping.form_complete_field_name = review.get("form_complete_field_name") or _expected_form_complete_field_name(
-        mapping.instrument_name
-    )
+    mapping.form_complete_field_name = _expected_form_complete_field_name(mapping.instrument_name)
     mapping.crf_status_field_name = selected_status.get("field_name")
     mapping.lock_date_field_name = selected_date.get("field_name")
     mapping.status = MappingStatus.INFERRED
@@ -767,7 +981,6 @@ def _get_mapping_job(
             select(Job)
             .where(Job.status == JobStatus.AWAITING_MAPPING_CONFIRMATION)
             .order_by(Job.created_at.desc())
-            .limit(1)
         )
     else:
         statement = (
@@ -777,13 +990,47 @@ def _get_mapping_job(
                 Job.status == JobStatus.AWAITING_MAPPING_CONFIRMATION,
             )
             .order_by(Job.created_at.desc())
-            .limit(1)
         )
 
-    return db.scalar(statement)
+    candidates = list(db.scalars(statement.limit(20)).all())
+    for candidate in candidates:
+        if not _is_mapping_refresh_prompt_pending(candidate):
+            return candidate
+    return None
 
 
-def _build_mapping_rows(job: Job, mappings: list[InstrumentMapping]) -> list[dict[str, object]]:
+def _derive_review_status_lock_value(
+    field_definition: dict[str, object] | None,
+    alias_bank: dict[str, list[str]],
+    *,
+    fallback_value: str,
+) -> str:
+    if fallback_value:
+        return fallback_value
+    if not isinstance(field_definition, dict):
+        return fallback_value
+
+    try:
+        status_configuration = resolve_status_field_configuration(field_definition, alias_bank)
+    except ValueError:
+        return fallback_value
+
+    if str(status_configuration.get("mode") or "").strip().lower() == "checkbox":
+        return str(
+            status_configuration.get("choice_value")
+            or status_configuration.get("export_field_name")
+            or fallback_value
+            or ""
+        ).strip()
+    return str(status_configuration.get("lock_value") or fallback_value or "").strip()
+
+
+def _build_mapping_rows(
+    job: Job,
+    mappings: list[InstrumentMapping],
+    *,
+    alias_bank: dict[str, list[str]],
+) -> list[dict[str, object]]:
     validation_summary = job.validation_summary_json if isinstance(job.validation_summary_json, dict) else {}
     review_lookup = validation_summary.get("instrument_reviews", {})
     instrument_sequence = validation_summary.get("instrument_sequence", [])
@@ -808,6 +1055,76 @@ def _build_mapping_rows(job: Job, mappings: list[InstrumentMapping]) -> list[dic
         coded_values = mapping.coded_values_json if isinstance(mapping.coded_values_json, dict) else {}
         status_config = coded_values.get("status_field") if isinstance(coded_values.get("status_field"), dict) else {}
         date_config = coded_values.get("date_field") if isinstance(coded_values.get("date_field"), dict) else {}
+        selected_status_candidate = review.get("selected_status_candidate") if isinstance(review.get("selected_status_candidate"), dict) else {}
+        selected_date_candidate = review.get("selected_date_candidate") if isinstance(review.get("selected_date_candidate"), dict) else {}
+        use_confirmed_mapping_defaults = mapping.status == MappingStatus.CONFIRMED
+        selected_status_field_name = (
+            mapping.crf_status_field_name
+            if use_confirmed_mapping_defaults
+            else selected_status_candidate.get("field_name")
+        ) or MAPPING_NONE_OPTION
+        selected_date_field_name = (
+            mapping.lock_date_field_name
+            if use_confirmed_mapping_defaults
+            else selected_date_candidate.get("field_name")
+        ) or MAPPING_NONE_OPTION
+        selected_status_field_definition = next(
+            (field for field in status_options if field.get("field_name") == selected_status_field_name),
+            None,
+        )
+        selected_status_field_type = str(selected_status_field_definition.get("field_type") or "").strip().lower() if isinstance(selected_status_field_definition, dict) else ""
+        selected_status_lock_value = (
+            (status_config.get("choice_value") or status_config.get("lock_value"))
+            if use_confirmed_mapping_defaults
+            else selected_status_candidate.get("lock_value")
+        ) or ""
+        selected_status_lock_value = _derive_review_status_lock_value(
+            selected_status_field_definition if isinstance(selected_status_field_definition, dict) else None,
+            alias_bank,
+            fallback_value=str(selected_status_lock_value),
+        )
+        selected_status_value_help = None
+        if selected_status_field_type == "checkbox":
+            matching_export = None
+            for export_item in selected_status_field_definition.get("export_field_names", []) if isinstance(selected_status_field_definition, dict) else []:
+                choice_value = str(export_item.get("choice_value") or "").strip()
+                export_field_name = str(export_item.get("export_field_name") or "").strip()
+                if selected_status_lock_value and (
+                    choice_value == selected_status_lock_value or export_field_name == selected_status_lock_value
+                ):
+                    matching_export = export_item
+                    break
+            if selected_status_lock_value:
+                export_field_name = str(matching_export.get("export_field_name") or "").strip() if isinstance(matching_export, dict) else ""
+                if export_field_name:
+                    selected_status_value_help = (
+                        f"Pre-filled with checkbox choice {selected_status_lock_value} "
+                        f"({export_field_name}). Change this only if a different checkbox option should mean locked."
+                    )
+                else:
+                    selected_status_value_help = (
+                        f"Pre-filled with checkbox choice {selected_status_lock_value}. "
+                        "Change this only if a different checkbox option should mean locked."
+                    )
+            else:
+                selected_status_value_help = (
+                    "Enter the checkbox choice code or REDCap export field name that should mean locked."
+                )
+        elif selected_status_field_type in {"radio", "dropdown"}:
+            if selected_status_lock_value:
+                selected_status_value_help = (
+                    f"Pre-filled with coded choice {selected_status_lock_value}. "
+                    "Change this only if another coded option should mean locked."
+                )
+            else:
+                selected_status_value_help = "Enter the coded choice value that should mean locked."
+        elif selected_status_field_type in {"yesno", "truefalse"}:
+            selected_status_value_help = "This field locks with value 1 and clears automatically on unlock."
+        selected_date_format = (
+            date_config.get("date_format")
+            if use_confirmed_mapping_defaults
+            else selected_date_candidate.get("date_format")
+        ) or MAPPING_AUTO_OPTION
 
         review_rows.append(
             {
@@ -815,12 +1132,11 @@ def _build_mapping_rows(job: Job, mappings: list[InstrumentMapping]) -> list[dic
                 "review": review,
                 "status_options": status_options,
                 "date_options": date_options,
-                "selected_status_field_name": mapping.crf_status_field_name or MAPPING_NONE_OPTION,
-                "selected_date_field_name": mapping.lock_date_field_name or MAPPING_NONE_OPTION,
-                "selected_status_lock_value": status_config.get("choice_value")
-                or status_config.get("lock_value")
-                or "",
-                "selected_date_format": date_config.get("date_format") or MAPPING_AUTO_OPTION,
+                "selected_status_field_name": selected_status_field_name,
+                "selected_date_field_name": selected_date_field_name,
+                "selected_status_lock_value": selected_status_lock_value,
+                "selected_status_value_help": selected_status_value_help,
+                "selected_date_format": selected_date_format,
             }
         )
 
@@ -851,6 +1167,10 @@ def _resolve_processing_mode(*, row_count: int) -> str:
     if live_processing_max_rows > 0 and 0 < row_count <= live_processing_max_rows:
         return "live"
     return "background"
+
+
+def _has_shared_redcap_api_key_cache_secret() -> bool:
+    return bool((settings.redcap_api_key_cache_secret or "").strip())
 
 
 def _processing_mode_runtime_phrase(processing_mode: str) -> str:
@@ -998,6 +1318,29 @@ def _build_job_outcome_copy(job: Job) -> str:
     return " ".join(parts) if parts else "Processing failed."
 
 
+def _build_job_result_stats(job: Job) -> list[str]:
+    if job.status not in REPORTABLE_JOB_STATUSES and job.processed_rows <= 0:
+        return []
+
+    stats: list[str] = []
+    if job.locked_rows:
+        stats.append(f"{job.locked_rows} locked")
+    if job.unlocked_rows:
+        stats.append(f"{job.unlocked_rows} unlocked")
+    if job.ignored_rows:
+        stats.append(f"{job.ignored_rows} skipped")
+    if job.blocked_rows:
+        stats.append(f"{job.blocked_rows} blocked")
+    if job.failed_rows:
+        stats.append(f"{job.failed_rows} failed")
+
+    unprocessed_rows = max((job.total_rows or 0) - (job.processed_rows or 0), 0)
+    if unprocessed_rows:
+        stats.append(f"{unprocessed_rows} not processed")
+
+    return stats
+
+
 def _build_job_scope_filter(current_user: User):
     if current_user.role in (Role.ADMIN, Role.SUPER_ADMIN):
         return None
@@ -1016,6 +1359,74 @@ def _set_job_runtime_state(job: Job, **updates: object) -> None:
     runtime_state.update(updates)
     options["runtime"] = runtime_state
     job.options_json = options
+
+
+def _get_job_worker_task_id(job: Job) -> str | None:
+    runtime_state = _get_job_runtime_state(job)
+    task_id = str(runtime_state.get("worker_task_id") or "").strip()
+    return task_id or None
+
+
+def _finalize_job_cancellation(
+    db: Session,
+    *,
+    job: Job,
+    previous_status: JobStatus,
+    cancellation_message: str,
+    row_message: str,
+    event_message: str,
+    actor_user_id: UUID | None = None,
+    processing_mode: str | None = None,
+    request: Request | None = None,
+) -> int:
+    cancelled_count = _mark_unprocessed_rows_as_cancelled(
+        db,
+        job_id=job.id,
+        reason=cancellation_message,
+        message=row_message,
+    )
+    _recalculate_job_rollups(db, job=job)
+    job.status = JobStatus.CANCELLED
+    job.cancellation_requested_at = job.cancellation_requested_at or utc_now()
+    job.completed_at = utc_now()
+    job.last_error_summary = cancellation_message
+    resolved_mode = str(_get_job_runtime_state(job).get("mode") or processing_mode or "background").strip() or "background"
+    _set_job_runtime_state(
+        job,
+        mode=resolved_mode,
+        phase="cancelled",
+        latest_message=cancellation_message,
+        rate_limit_wait_until=None,
+    )
+    _record_job_event(
+        db,
+        job=job,
+        event_type="job.cancelled",
+        message=event_message,
+        status_from=previous_status,
+        status_to=JobStatus.CANCELLED,
+        payload_json={
+            "cancelled_rows": cancelled_count,
+            "processing_mode": resolved_mode,
+        },
+    )
+    rows = _load_job_rows_for_report(db, job_id=job.id)
+    _upsert_job_report(db, job=job, rows=rows)
+    if actor_user_id is not None:
+        record_audit_event(
+            db,
+            actor_user_id=actor_user_id,
+            action="jobs.cancel",
+            object_type="job",
+            object_id=str(job.id),
+            request=request,
+            metadata={
+                "previous_status": previous_status.value,
+                "cancelled_rows": cancelled_count,
+                "processing_mode": resolved_mode,
+            },
+        )
+    return cancelled_count
 
 
 def _parse_runtime_timestamp(value: object) -> datetime | None:
@@ -1058,6 +1469,8 @@ def _summarize_job_progress(job: Job) -> dict[str, object]:
             if processing_mode == "background"
             else "Processing rows live in this browser session."
         )
+    elif job.status == JobStatus.CANCEL_REQUESTED and not latest_message:
+        latest_message = "Cancellation requested. Waiting for the current step to finish before stopping this job."
     elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT and not latest_message:
         latest_message = "Paused because the REDCap API rate limit was reached."
 
@@ -1132,7 +1545,12 @@ def _list_visible_jobs(
     current_user: User,
     limit: int | None = None,
 ) -> list[Job]:
-    statement = select(Job).where(Job.status.in_(JOBS_VISIBLE_STATUSES)).order_by(Job.updated_at.desc())
+    statement = (
+        select(Job)
+        .options(selectinload(Job.redcap_host))
+        .where(Job.status.in_(JOBS_VISIBLE_STATUSES))
+        .order_by(Job.updated_at.desc())
+    )
     scope_filter = _build_job_scope_filter(current_user)
     if scope_filter is not None:
         statement = statement.where(scope_filter)
@@ -1241,6 +1659,17 @@ def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
     return output.getvalue().encode("utf-8")
 
 
+def _load_job_rows_for_report(db: Session, *, job_id: UUID) -> list[JobRow]:
+    return list(
+        db.scalars(
+            select(JobRow)
+            .options(selectinload(JobRow.row_result))
+            .where(JobRow.job_id == job_id)
+            .order_by(JobRow.row_number)
+        ).all()
+    )
+
+
 def _upsert_job_report(db: Session, *, job: Job, rows: list[JobRow]) -> Report:
     report = db.scalar(
         select(Report).where(
@@ -1270,12 +1699,36 @@ def _upsert_job_report(db: Session, *, job: Job, rows: list[JobRow]) -> Report:
     return report
 
 
-def _ensure_reports_for_jobs(db: Session, jobs: list[Job]) -> None:
+def _ensure_report_record(db: Session, *, job: Job) -> Report:
+    report = db.scalar(
+        select(Report).where(
+            Report.job_id == job.id,
+            Report.report_type == ReportType.CSV,
+        )
+    )
+    file_name = _build_job_report_filename(job)
+    if report is None:
+        report = Report(
+            job_id=job.id,
+            report_type=ReportType.CSV,
+            storage_path=f"generated://job/{job.id}/{file_name}",
+            file_name=file_name,
+            content_type="text/csv",
+        )
+        db.add(report)
+        return report
+
+    report.file_name = report.file_name or file_name
+    report.content_type = report.content_type or "text/csv"
+    report.storage_path = report.storage_path or f"generated://job/{job.id}/{report.file_name}"
+    return report
+
+
+def _ensure_report_records_for_jobs(db: Session, jobs: list[Job]) -> None:
     for job in jobs:
         if job.status not in REPORTABLE_JOB_STATUSES:
             continue
-        rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job.id).order_by(JobRow.row_number)).all())
-        _upsert_job_report(db, job=job, rows=rows)
+        _ensure_report_record(db, job=job)
 
 
 def _build_report_rows(
@@ -1286,6 +1739,7 @@ def _build_report_rows(
 ) -> list[dict[str, object]]:
     statement = (
         select(Report)
+        .options(selectinload(Report.job).selectinload(Job.redcap_host))
         .join(Job, Report.job_id == Job.id)
         .where(Report.report_type == ReportType.CSV)
         .order_by(Job.updated_at.desc())
@@ -1328,14 +1782,28 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
         action_label = None
         action_kind = None
         cancel_label = None
+        continue_label = None
+        remap_label = None
         launch_mode: str | None = None
-        if job.status == JobStatus.AWAITING_MAPPING_CONFIRMATION:
+        status_label = job.status.value.replace("_", " ").title()
+        if job.status == JobStatus.AWAITING_MAPPING_CONFIRMATION and _is_mapping_refresh_prompt_pending(job):
+            action_hint = (
+                "This REDCap project already has saved extra-field mappings. "
+                "Refresh mappings from REDCap if the project metadata may have changed, or continue with the existing saved mappings."
+            )
+            status_tone = "status-review"
+            status_label = "Refresh Decision"
+            cancel_label = "Cancel Job"
+            continue_label = "Use existing mappings"
+            remap_label = "Refresh mappings"
+        elif job.status == JobStatus.AWAITING_MAPPING_CONFIRMATION:
             action_href = f"/mappings?job_id={job.id}"
             action_label = "Review mappings"
             action_kind = "link"
             action_hint = "Manual review needed before execution."
             status_tone = "status-review"
             cancel_label = "Cancel Job"
+            remap_label = "Refresh options"
         elif job.status == JobStatus.READY:
             launch_mode = _resolve_processing_mode(row_count=job.total_rows or 0)
             if has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
@@ -1366,6 +1834,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 f"Queued {_processing_mode_runtime_phrase(active_mode)} for this REDCap project. {progress['rate_limit_copy']}"
             )
             status_tone = "status-review"
+            cancel_label = "Cancel Job"
         elif job.status == JobStatus.RUNNING:
             active_mode = str(progress["mode"])
             action_hint = (
@@ -1373,6 +1842,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 f"{progress['rate_limit_copy']}"
             )
             status_tone = "status-review"
+            cancel_label = "Cancel Job"
         elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT:
             active_mode = str(progress["mode"])
             action_hint = progress["wait_message"] or (
@@ -1380,7 +1850,15 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 f"{_processing_mode_action_label(active_mode)} continues."
             )
             status_tone = "status-review"
+            cancel_label = "Cancel Job"
+        elif job.status == JobStatus.CANCEL_REQUESTED:
+            action_hint = progress["message"] or "Cancellation requested. Waiting for the current step to finish."
+            status_tone = "status-review"
         elif job.status == JobStatus.CANCELLED:
+            if report is not None:
+                action_href = f"/reports/{report.id}/download"
+                action_label = "Export Report"
+                action_kind = "download"
             action_hint = job.last_error_summary or "Cancelled before processing started."
             status_tone = "status-inactive"
         elif job.status == JobStatus.COMPLETED:
@@ -1426,13 +1904,16 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 "host_label": host_label,
                 "review_instruments": review_instruments,
                 "review_count": len(review_instruments),
-                "status_label": job.status.value.replace("_", " ").title(),
+                "result_stats": _build_job_result_stats(job),
+                "status_label": status_label,
                 "status_tone": status_tone,
                 "action_href": action_href,
                 "action_label": action_label,
                 "action_kind": action_kind,
                 "action_hint": action_hint,
                 "cancel_label": cancel_label,
+                "continue_label": continue_label,
+                "remap_label": remap_label,
                 "launch_mode": launch_mode,
                 "report_href": f"/reports/{report.id}/download" if report is not None else None,
                 "progress": progress,
@@ -1824,7 +2305,7 @@ def jobs_page(request: Request, db: Session = Depends(get_db_session)):
         process_job_id = None
 
     jobs = _list_visible_jobs(db, current_user=session.user, limit=RECENT_JOBS_LIMIT)
-    _ensure_reports_for_jobs(db, jobs)
+    _ensure_report_records_for_jobs(db, jobs)
     db.commit()
 
     job_review_rows = _build_job_review_rows(jobs, db=db, user_session_id=session.id)
@@ -2084,6 +2565,7 @@ def import_jobs_request_file(
             )
         ).all()
     }
+    reused_confirmed_mapping_instruments: list[str] = []
 
     for instrument_name in target_instruments:
         review = mapping_review_bundle["instrument_reviews"][instrument_name]
@@ -2103,6 +2585,7 @@ def import_jobs_request_file(
             if not mapping.form_complete_field_name:
                 mapping.form_complete_field_name = _expected_form_complete_field_name(instrument_name)
             mapping.last_validated_at = now
+            reused_confirmed_mapping_instruments.append(instrument_name)
         else:
             if mapping.status == MappingStatus.CONFIRMED:
                 mapping.drift_detected_at = now
@@ -2118,12 +2601,14 @@ def import_jobs_request_file(
     review_instrument_count = sum(
         1 for instrument_name in target_instruments if mapping_review_bundle["instrument_reviews"][instrument_name]["requires_confirmation"]
     )
+    mapping_refresh_prompt_pending = bool(reused_confirmed_mapping_instruments)
+    continue_status = JobStatus.AWAITING_MAPPING_CONFIRMATION if review_instrument_count else JobStatus.READY
     job_type, has_mixed_actions = _determine_job_type(parsed_rows)
     job = Job(
         owner_id=session.user.id,
         redcap_host_id=redcap_host.id,
         job_type=job_type,
-        status=JobStatus.AWAITING_MAPPING_CONFIRMATION if review_instrument_count else JobStatus.READY,
+        status=JobStatus.AWAITING_MAPPING_CONFIRMATION if (review_instrument_count or mapping_refresh_prompt_pending) else JobStatus.READY,
         redcap_api_url=cleaned_api_url,
         redcap_project_id=redcap_project_id,
         redcap_project_title=str(project_info.get("project_title") or "").strip() or None,
@@ -2138,6 +2623,10 @@ def import_jobs_request_file(
             "has_mixed_actions": has_mixed_actions,
             "mapping_review_required": review_instrument_count > 0,
             "mapping_review_instrument_count": review_instrument_count,
+            "mapping_refresh_prompt_pending": mapping_refresh_prompt_pending,
+            "mapping_refresh_continue_status": continue_status.value if mapping_refresh_prompt_pending else None,
+            "mapping_refresh_confirmed_instrument_count": len(reused_confirmed_mapping_instruments),
+            "mapping_refresh_confirmed_instruments": reused_confirmed_mapping_instruments,
         },
         validation_summary_json={
             "project_info": project_info,
@@ -2189,7 +2678,20 @@ def import_jobs_request_file(
     del cleaned_api_key
     db.commit()
 
-    if review_instrument_count:
+    if mapping_refresh_prompt_pending:
+        confirmed_mapping_count = len(reused_confirmed_mapping_instruments)
+        confirmed_mapping_copy = f"{confirmed_mapping_count} form{'s' if confirmed_mapping_count != 1 else ''}"
+        if review_instrument_count:
+            success_message = (
+                f"Imported {filename}. This REDCap project already has saved mappings for "
+                f"{confirmed_mapping_copy}. Confirm whether REDCap changed before continuing to mapping review."
+            )
+        else:
+            success_message = (
+                f"Imported {filename}. This REDCap project already has saved mappings for "
+                f"{confirmed_mapping_copy}. Confirm whether REDCap changed before this job is marked ready."
+            )
+    elif review_instrument_count:
         success_message = (
             f"Imported {filename}. Review {review_instrument_count} form mapping"
             f"{'s' if review_instrument_count != 1 else ''} from the Jobs queue before the execution stage."
@@ -2200,43 +2702,62 @@ def import_jobs_request_file(
     return _build_jobs_redirect(success=success_message)
 
 
-def _release_background_job_thread(job_id: UUID) -> None:
-    with _background_job_threads_lock:
-        _background_job_threads.pop(job_id, None)
-
-
-def _spawn_background_job(job_id: UUID, actor_user_id: UUID, api_key: str, retry_row_ids: list[UUID] | None = None) -> bool:
-    with _background_job_threads_lock:
-        existing_thread = _background_job_threads.get(job_id)
-        if existing_thread is not None and existing_thread.is_alive():
-            return False
-
-        worker = Thread(
-            target=_run_job_processing,
-            args=(job_id, actor_user_id, api_key, retry_row_ids or []),
-            kwargs={"processing_mode": "background"},
-            name=f"job-worker-{job_id}",
-            daemon=True,
-        )
-        _background_job_threads[job_id] = worker
-        worker.start()
-        return True
-
-
-def _run_job_processing(
+def run_job_processing(
     job_id: UUID,
     actor_user_id: UUID,
     api_key: str,
     retry_row_ids: list[UUID],
     *,
     processing_mode: str = "background",
+    user_session_id: UUID | None = None,
 ) -> None:
     processing_mode = "live" if processing_mode == "live" else "background"
     db = SessionLocal()
     try:
+        retry_row_ids = [UUID(str(row_id)) for row_id in retry_row_ids]
         job = db.get(Job, job_id)
         if job is None:
             return
+        if job.status == JobStatus.CANCELLED:
+            return
+
+        def cancel_if_requested(cancellation_message: str) -> bool:
+            db.refresh(job, attribute_names=["status", "cancellation_requested_at"])
+            if job.status != JobStatus.CANCEL_REQUESTED:
+                return False
+            _finalize_job_cancellation(
+                db,
+                job=job,
+                previous_status=JobStatus.CANCEL_REQUESTED,
+                cancellation_message=cancellation_message,
+                row_message="Row was not processed because the job was cancelled during background processing.",
+                event_message="Cancelled during background processing. Remaining rows were marked as not processed.",
+                actor_user_id=actor_user_id,
+                processing_mode=processing_mode,
+            )
+            db.commit()
+            return True
+
+        if cancel_if_requested("Job was cancelled before background processing started."):
+            return
+        cleaned_api_key = api_key.strip()
+        if not cleaned_api_key and user_session_id is not None and job.redcap_host_id is not None:
+            cached_api_key = get_cached_redcap_api_key(
+                db,
+                user_session_id=user_session_id,
+                redcap_host_id=job.redcap_host_id,
+            )
+            if cached_api_key:
+                cleaned_api_key = cached_api_key
+        if not cleaned_api_key:
+            if processing_mode == "background" and not _has_shared_redcap_api_key_cache_secret():
+                raise ValueError(
+                    "Background processing requires REDCAP_API_KEY_CACHE_SECRET to be configured with the same value "
+                    "for the API and worker services before the encrypted REDCap API key cache can be reused."
+                )
+            raise ValueError(
+                "A valid REDCap API key was not available for this background job. Please start the job again from the Jobs page."
+            )
 
         resolved_rate_limit = set_redcap_rate_limit_for_scope(
             job.redcap_api_url,
@@ -2275,6 +2796,9 @@ def _run_job_processing(
                 )
                 db.commit()
             elif event_type == "resumed":
+                db.refresh(job, attribute_names=["status", "cancellation_requested_at"])
+                if job.status == JobStatus.CANCEL_REQUESTED:
+                    return
                 previous_status = job.status
                 job.status = JobStatus.RUNNING
                 _set_job_runtime_state(
@@ -2351,8 +2875,11 @@ def _run_job_processing(
         )
         db.commit()
 
+        if cancel_if_requested("Job was cancelled before background processing started."):
+            return
+
         with redcap_rate_limit_scope(job.redcap_api_url, job.redcap_project_id), redcap_rate_limit_notifications(on_rate_limit_event):
-            preflight_bundle = fetch_redcap_preflight_bundle(job.redcap_api_url, api_key)
+            preflight_bundle = fetch_redcap_preflight_bundle(job.redcap_api_url, cleaned_api_key)
             if not preflight_bundle["locking_api_available"]:
                 raise RedcapServiceError("locking_api is not enabled or not reachable for this REDCap project.")
 
@@ -2403,7 +2930,12 @@ def _run_job_processing(
             )
             db.commit()
 
+            if cancel_if_requested("Job was cancelled during background processing."):
+                return
+
             for row in rows:
+                if cancel_if_requested("Job was cancelled during background processing."):
+                    return
                 started = perf_counter()
                 row_result = row.row_result
                 if row_result is None:
@@ -2429,7 +2961,7 @@ def _run_job_processing(
                     locking_instance = row.repeat_instance if row.repeat_instance is not None else repeat_context_instance
                     status_response = fetch_locking_status(
                         job.redcap_api_url,
-                        api_key,
+                        cleaned_api_key,
                         record_id=row.record_id,
                         instrument_name=row.target_instrument,
                         event_name=row.event_name,
@@ -2505,7 +3037,7 @@ def _run_job_processing(
                             processing_steps.append("Cleared mapped shadow fields after detecting the form was already unlocked.")
                             import_record_update(
                                 job.redcap_api_url,
-                                api_key,
+                                cleaned_api_key,
                                 record=shadow_field_payload,
                                 date_format=shadow_import_date_format,
                             )
@@ -2532,7 +3064,7 @@ def _run_job_processing(
                         if row.action == RowAction.LOCK:
                             form_complete_field_name, form_complete_value, form_complete_row = _fetch_form_complete_snapshot(
                                 api_url=job.redcap_api_url,
-                                api_key=api_key,
+                                api_key=cleaned_api_key,
                                 row=row,
                                 mapping=mapping,
                                 record_id_field_name=record_id_field_name,
@@ -2591,7 +3123,7 @@ def _run_job_processing(
                             processing_steps.append("Wrote mapped shadow fields before locking.")
                             import_record_update(
                                 job.redcap_api_url,
-                                api_key,
+                                cleaned_api_key,
                                 record=shadow_field_payload,
                                 date_format=shadow_import_date_format,
                             )
@@ -2602,7 +3134,7 @@ def _run_job_processing(
                         processing_steps.append(f"Called REDCap {row.action.value} action.")
                         action_response = apply_locking_action(
                             job.redcap_api_url,
-                            api_key,
+                            cleaned_api_key,
                             action=row.action.value,
                             record_id=row.record_id,
                             instrument_name=row.target_instrument,
@@ -2614,7 +3146,7 @@ def _run_job_processing(
                             processing_steps.append("Cleared mapped shadow fields after unlocking.")
                             import_record_update(
                                 job.redcap_api_url,
-                                api_key,
+                                cleaned_api_key,
                                 record=shadow_field_payload,
                                 date_format=shadow_import_date_format,
                             )
@@ -2622,7 +3154,7 @@ def _run_job_processing(
 
                         verification_response = fetch_locking_status(
                             job.redcap_api_url,
-                            api_key,
+                            cleaned_api_key,
                             record_id=row.record_id,
                             instrument_name=row.target_instrument,
                             event_name=row.event_name,
@@ -2737,13 +3269,17 @@ def _run_job_processing(
                     row_result.duration_ms = max(1, int((perf_counter() - started) * 1000))
                     row_result.processed_at = utc_now()
                     job.processed_rows += 1
-                    job.status = JobStatus.RUNNING
+                    current_status = db.scalar(select(Job.status).where(Job.id == job.id)) or job.status
+                    is_cancel_requested = current_status == JobStatus.CANCEL_REQUESTED
+                    job.status = JobStatus.CANCEL_REQUESTED if is_cancel_requested else JobStatus.RUNNING
                     _set_job_runtime_state(
                         job,
                         mode=processing_mode,
-                        phase="processing_rows",
+                        phase="cancelling" if is_cancel_requested else "processing_rows",
                         latest_message=(
-                            f"Retried {job.processed_rows} of {len(rows)} remaining rows {_processing_mode_runtime_phrase(processing_mode)}."
+                            "Cancellation requested. Waiting for the current step to finish before stopping this job."
+                            if is_cancel_requested
+                            else f"Retried {job.processed_rows} of {len(rows)} remaining rows {_processing_mode_runtime_phrase(processing_mode)}."
                             if retry_scope == "remaining_rows"
                             else f"Retried {job.processed_rows} of {len(rows)} failed rows {_processing_mode_runtime_phrase(processing_mode)}."
                             if retry_row_ids
@@ -2796,7 +3332,7 @@ def _run_job_processing(
                 "failed_rows": job.failed_rows,
             },
         )
-        rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job.id).order_by(JobRow.row_number)).all())
+        rows = _load_job_rows_for_report(db, job_id=job.id)
         _upsert_job_report(db, job=job, rows=rows)
         record_audit_event(
             db,
@@ -2843,7 +3379,7 @@ def _run_job_processing(
                 status_from=previous_status,
                 status_to=JobStatus.FAILED,
             )
-            rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job.id).order_by(JobRow.row_number)).all())
+            rows = _load_job_rows_for_report(db, job_id=job.id)
             _upsert_job_report(db, job=job, rows=rows)
             record_audit_event(
                 db,
@@ -2861,8 +3397,6 @@ def _run_job_processing(
             db.commit()
     finally:
         db.close()
-        if processing_mode == "background":
-            _release_background_job_thread(job_id)
 
 
 @router.post("/jobs/{job_id}/process")
@@ -2930,6 +3464,14 @@ def process_job_from_ui(
             return _build_jobs_redirect(error="This job has no failed or unprocessed rows left to retry.")
     active_row_count = len(retry_row_ids) if retry_row_ids else int(job.total_rows or 0)
     launch_mode = _resolve_processing_mode(row_count=active_row_count)
+    if launch_mode == "background" and not _has_shared_redcap_api_key_cache_secret():
+        return _build_jobs_redirect(
+            error=(
+                "Background processing requires REDCAP_API_KEY_CACHE_SECRET to be configured with the same value "
+                "for the API and worker services. Update the environment and try again."
+            ),
+            process_job_id=job.id,
+        )
 
     active_project_job = _find_active_project_job(db, job=job)
     if active_project_job is not None:
@@ -2957,7 +3499,7 @@ def process_job_from_ui(
 
     if launch_mode == "live":
         db.commit()
-        _run_job_processing(job.id, session.user.id, cleaned_api_key, retry_row_ids, processing_mode="live")
+        run_job_processing(job.id, session.user.id, cleaned_api_key, retry_row_ids, processing_mode="live")
         db.expire_all()
         refreshed_job = db.get(Job, job.id)
         job_label = (refreshed_job.request_file_name if refreshed_job is not None else None) or (job.request_file_name or "job")
@@ -2978,6 +3520,17 @@ def process_job_from_ui(
         return _build_jobs_redirect(success=live_message)
 
     previous_status = job.status
+    previous_started_at = job.started_at
+    previous_completed_at = job.completed_at
+    previous_last_error_summary = job.last_error_summary
+    previous_processed_rows = job.processed_rows
+    previous_locked_rows = job.locked_rows
+    previous_unlocked_rows = job.unlocked_rows
+    previous_ignored_rows = job.ignored_rows
+    previous_blocked_rows = job.blocked_rows
+    previous_failed_rows = job.failed_rows
+    previous_options_json = job.options_json
+    queued_task_id = str(uuid4())
     job.status = JobStatus.QUEUED
     job.started_at = None
     job.completed_at = None
@@ -3003,6 +3556,8 @@ def process_job_from_ui(
         active_row_count=active_row_count,
         retry_failed_count=int(retry_summary["failed_count"]) if retry_row_ids else 0,
         retry_unprocessed_count=int(retry_summary["unprocessed_count"]) if retry_row_ids else 0,
+        worker_backend="celery",
+        worker_task_id=queued_task_id,
     )
     _record_job_event(
         db,
@@ -3016,8 +3571,41 @@ def process_job_from_ui(
         status_from=previous_status,
     )
     db.commit()
-    if not _spawn_background_job(job.id, session.user.id, cleaned_api_key, retry_row_ids):
-        return _build_jobs_redirect(error="This job is already being processed in the background.")
+    try:
+        enqueue_job_processing(
+            job_id=job.id,
+            actor_user_id=session.user.id,
+            user_session_id=session.id,
+            retry_row_ids=retry_row_ids,
+            task_id=queued_task_id,
+        )
+    except Exception as exc:
+        db.rollback()
+        queued_job = db.get(Job, job.id)
+        if queued_job is not None:
+            dispatch_failed_from = queued_job.status
+            queued_job.status = previous_status
+            queued_job.started_at = previous_started_at
+            queued_job.completed_at = previous_completed_at
+            queued_job.last_error_summary = previous_last_error_summary
+            queued_job.processed_rows = previous_processed_rows
+            queued_job.locked_rows = previous_locked_rows
+            queued_job.unlocked_rows = previous_unlocked_rows
+            queued_job.ignored_rows = previous_ignored_rows
+            queued_job.blocked_rows = previous_blocked_rows
+            queued_job.failed_rows = previous_failed_rows
+            queued_job.options_json = previous_options_json
+            _record_job_event(
+                db,
+                job=queued_job,
+                event_type="job.processing_queue_failed",
+                level=EventLevel.ERROR,
+                message=f"Could not queue the background worker task: {exc}",
+                status_from=dispatch_failed_from,
+                status_to=previous_status,
+            )
+            db.commit()
+        return _build_jobs_redirect(error="Could not queue this job for background processing. Please try again.")
     return _build_jobs_redirect(
         success=(
             (
@@ -3044,52 +3632,67 @@ def cancel_job_from_ui(
     if job is None or not _can_access_job(session.user, job):
         return RedirectResponse("/jobs", status_code=303)
 
+    if job.status == JobStatus.CANCEL_REQUESTED:
+        return _build_jobs_redirect(error="Cancellation has already been requested for this job.")
     if job.status not in USER_CANCELLABLE_JOB_STATUSES:
-        return _build_jobs_redirect(error="Only jobs that are still awaiting action can be cancelled.")
+        return _build_jobs_redirect(error="Only jobs that are still awaiting action or actively processing can be cancelled.")
 
     previous_status = job.status
-    cancellation_message = "Job was cancelled before processing started."
-    cancelled_count = _mark_unprocessed_rows_as_cancelled(
-        db,
-        job_id=job.id,
-        reason=cancellation_message,
-        message="Row was not processed because the job was cancelled before execution started.",
-    )
-    _recalculate_job_rollups(db, job=job)
-    job.status = JobStatus.CANCELLED
+    job_label = job.request_file_name or "job"
+    if job.status in PRESTART_CANCELLABLE_JOB_STATUSES:
+        worker_task_id = _get_job_worker_task_id(job)
+        if worker_task_id:
+            try:
+                revoke_job_processing(worker_task_id)
+            except Exception:
+                pass
+        cancellation_message = "Job was cancelled before processing started."
+        _finalize_job_cancellation(
+            db,
+            job=job,
+            previous_status=previous_status,
+            cancellation_message=cancellation_message,
+            row_message="Row was not processed because the job was cancelled before execution started.",
+            event_message="Cancelled before processing started. Remaining rows were marked as not processed.",
+            actor_user_id=session.user.id,
+            processing_mode="background",
+            request=request,
+        )
+        if previous_status == JobStatus.QUEUED:
+            job.started_at = None
+        db.commit()
+        return _build_jobs_redirect(success=f"Cancelled job for {job_label}.")
+
+    job.status = JobStatus.CANCEL_REQUESTED
     job.cancellation_requested_at = utc_now()
-    job.started_at = None
-    job.completed_at = utc_now()
-    job.last_error_summary = cancellation_message
     _set_job_runtime_state(
         job,
-        phase="cancelled",
-        latest_message=cancellation_message,
+        phase="cancelling",
+        latest_message="Cancellation requested. The current step will finish before this job stops.",
         rate_limit_wait_until=None,
     )
     _record_job_event(
         db,
         job=job,
-        event_type="job.cancelled",
-        message=(
-            f"Cancelled before processing started. {_format_row_count(cancelled_count).capitalize()} "
-            f"{'was' if cancelled_count == 1 else 'were'} left unprocessed."
-        ),
+        event_type="job.cancel_requested",
+        message="Cancellation was requested from the Jobs page.",
         status_from=previous_status,
-        status_to=JobStatus.CANCELLED,
-        payload_json={"cancelled_rows": cancelled_count},
+        status_to=JobStatus.CANCEL_REQUESTED,
+        payload_json={"worker_task_id": _get_job_worker_task_id(job)},
     )
     record_audit_event(
         db,
         actor_user_id=session.user.id,
-        action="jobs.cancel",
+        action="jobs.cancel_requested",
         object_type="job",
         object_id=str(job.id),
         request=request,
-        metadata={"previous_status": previous_status.value, "cancelled_rows": cancelled_count},
+        metadata={"previous_status": previous_status.value},
     )
     db.commit()
-    return _build_jobs_redirect(success=f"Cancelled job for {job.request_file_name or 'job'}.")
+    return _build_jobs_redirect(
+        success=f"Cancellation requested for {job_label}. The current step will finish before the job stops."
+    )
 
 
 @router.get("/mappings", response_class=HTMLResponse)
@@ -3104,10 +3707,19 @@ def mappings_page(request: Request, db: Session = Depends(get_db_session)):
     except ValueError:
         parsed_job_id = None
     job = _get_mapping_job(db, current_user=session.user, job_id=parsed_job_id)
+    if job is not None and _is_mapping_refresh_prompt_pending(job):
+        return _build_jobs_redirect(
+            error="Choose whether to refresh the saved project mappings from the Jobs page before opening mapping review."
+        )
 
     mapping_rows: list[dict[str, object]] = []
     if job is not None and job.redcap_project_id:
         validation_summary = job.validation_summary_json if isinstance(job.validation_summary_json, dict) else {}
+        alias_bank = get_mapping_label_aliases(db)
+        refreshed_summary = refresh_mapping_review_bundle(validation_summary, alias_bank=alias_bank)
+        if refreshed_summary.get("instrument_reviews"):
+            job.validation_summary_json = refreshed_summary
+            validation_summary = refreshed_summary
         project_mappings = db.scalars(
             select(InstrumentMapping).where(
                 InstrumentMapping.redcap_host_id == job.redcap_host_id,
@@ -3115,7 +3727,7 @@ def mappings_page(request: Request, db: Session = Depends(get_db_session)):
                 InstrumentMapping.instrument_name.in_(validation_summary.get("instrument_sequence", [])),
             )
         ).all()
-        mapping_rows = _build_mapping_rows(job, list(project_mappings))
+        mapping_rows = _build_mapping_rows(job, list(project_mappings), alias_bank=alias_bank)
 
     return templates.TemplateResponse(
         request=request,
@@ -3133,6 +3745,94 @@ def mappings_page(request: Request, db: Session = Depends(get_db_session)):
             "date_format_options": sorted(DATE_FORMAT_OPTIONS),
             **_build_sidebar_context(active_path="/mappings", current_user=session.user),
         },
+    )
+
+
+@router.post("/mappings/{job_id}/refresh")
+def refresh_mappings_from_ui(
+    job_id: UUID,
+    request: Request,
+    return_to: str = Form(default="mappings"),
+    db: Session = Depends(get_db_session),
+):
+    _, session = get_optional_session(request, db)
+    if session is None:
+        return RedirectResponse("/login", status_code=303)
+
+    job = db.get(Job, job_id)
+    if job is None or not _can_access_job(session.user, job):
+        return RedirectResponse("/jobs", status_code=303)
+
+    if job.status != JobStatus.AWAITING_MAPPING_CONFIRMATION:
+        return _build_jobs_redirect(error="Only jobs that are awaiting mapping confirmation can be remapped.")
+
+    try:
+        review_instrument_count = _refresh_job_mapping_review(db, job=job, user_session_id=session.id)
+        record_audit_event(
+            db,
+            actor_user_id=session.user.id,
+            action="mappings.refresh",
+            object_type="job",
+            object_id=str(job.id),
+            request=request,
+            metadata={
+                "review_instrument_count": review_instrument_count,
+                "job_status_after_refresh": job.status.value,
+            },
+        )
+        db.commit()
+    except (RedcapServiceError, ValueError) as exc:
+        db.rollback()
+        if str(return_to).strip().lower() == "mappings":
+            return _build_mappings_redirect(job_id, error=str(exc))
+        return _build_jobs_redirect(error=str(exc))
+
+    if review_instrument_count == 0:
+        return _build_jobs_redirect(success="Mappings refreshed from REDCap. This job no longer needs manual review and is ready to process.")
+
+    success_message = (
+        f"Mappings refreshed from REDCap for {review_instrument_count} form"
+        f"{'s' if review_instrument_count != 1 else ''}. Review the updated options below."
+    )
+    if str(return_to).strip().lower() == "mappings":
+        return _build_mappings_redirect(job_id, success=success_message)
+    return _build_jobs_redirect(success=success_message)
+
+
+@router.post("/jobs/{job_id}/use-existing-mappings")
+def continue_with_existing_mappings_from_ui(
+    job_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db_session),
+):
+    _, session = get_optional_session(request, db)
+    if session is None:
+        return RedirectResponse("/login", status_code=303)
+
+    job = db.get(Job, job_id)
+    if job is None or not _can_access_job(session.user, job):
+        return RedirectResponse("/jobs", status_code=303)
+
+    try:
+        next_status = _continue_job_with_existing_mappings(job)
+        record_audit_event(
+            db,
+            actor_user_id=session.user.id,
+            action="mappings.use_existing",
+            object_type="job",
+            object_id=str(job.id),
+            request=request,
+            metadata={"job_status_after_continue": next_status.value},
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return _build_jobs_redirect(error=str(exc))
+
+    if next_status == JobStatus.READY:
+        return _build_jobs_redirect(success="Continuing with the saved project mappings. This job is ready to process.")
+    return _build_jobs_redirect(
+        success="Continuing with the saved project mappings. Review the remaining mapping options before execution."
     )
 
 
@@ -3238,7 +3938,7 @@ async def confirm_mappings_from_ui(
                     override_format=None if date_format_override == MAPPING_AUTO_OPTION else date_format_override,
                 )
 
-            mapping.form_complete_field_name = review.get("form_complete_field_name")
+            mapping.form_complete_field_name = _expected_form_complete_field_name(instrument_name)
             mapping.crf_status_field_name = selected_status_field_name
             mapping.lock_date_field_name = selected_date_field_name
             mapping.status = MappingStatus.CONFIRMED
@@ -3291,7 +3991,7 @@ def reports_page(request: Request, db: Session = Depends(get_db_session)):
     all_visible_jobs = _list_visible_jobs(db, current_user=session.user, limit=None)
     latest_jobs = all_visible_jobs[:RECENT_JOBS_LIMIT]
     older_jobs = all_visible_jobs[RECENT_JOBS_LIMIT:]
-    _ensure_reports_for_jobs(db, older_jobs)
+    _ensure_report_records_for_jobs(db, older_jobs)
     db.commit()
     report_rows = _build_report_rows(
         db,
@@ -3325,7 +4025,7 @@ def download_report(report_id: UUID, request: Request, db: Session = Depends(get
     if report is None or not _can_access_job(session.user, report.job):
         return RedirectResponse("/reports", status_code=303)
 
-    rows = list(db.scalars(select(JobRow).where(JobRow.job_id == report.job_id).order_by(JobRow.row_number)).all())
+    rows = _load_job_rows_for_report(db, job_id=report.job_id)
     report_bytes = _build_job_report_csv(report.job, rows)
     report.byte_size = len(report_bytes)
     report.checksum_sha256 = hashlib.sha256(report_bytes).hexdigest()

@@ -235,7 +235,7 @@
                         </p>
                       </td>
                       <td class="actions-column">
-                        <a class="manage-button" href="{{ row.download_href }}">Export Report</a>
+                        <a class="manage-button" href="{{ row.download_href }}" data-report-download>Export Report</a>
                       </td>
                     </tr>
                   {% endfor %}
@@ -264,6 +264,30 @@
   </div>
 
   {% if report_rows %}
+    <div id="reports-download-overlay" class="progress-overlay" hidden>
+      <div class="progress-dialog" role="status" aria-live="polite" aria-atomic="true">
+        <div class="progress-heading">
+          <span class="loader-spinner" aria-hidden="true"></span>
+          <div>
+            <p class="mini-label">Exporting Report</p>
+            <h3 id="reports-download-title">Preparing report export</h3>
+          </div>
+        </div>
+        <p id="reports-download-copy" class="compact-copy">
+          Building the latest CSV report and starting the download.
+        </p>
+
+        <div class="progress-meter" aria-hidden="true">
+          <div id="reports-download-fill" class="progress-meter-fill"></div>
+        </div>
+
+        <p id="reports-download-stage" class="progress-stage-copy">Loading report rows</p>
+        <p class="compact-copy progress-mode-copy">
+          Report export: Keep this page open while the CSV file is prepared.
+        </p>
+      </div>
+    </div>
+
     <script>
       const reportsSearchInput = document.getElementById("reports-search");
       const reportsEntriesSelect = document.getElementById("reports-entries-per-page");
@@ -273,7 +297,15 @@
       const reportsNextPage = document.getElementById("reports-next-page");
       const reportsEmptyFilter = document.getElementById("reports-empty-filter");
       const reportRows = Array.from(document.querySelectorAll("[data-report-row]"));
+      const reportDownloadLinks = Array.from(document.querySelectorAll("[data-report-download]"));
+      const reportsDownloadOverlay = document.getElementById("reports-download-overlay");
+      const reportsDownloadTitle = document.getElementById("reports-download-title");
+      const reportsDownloadCopy = document.getElementById("reports-download-copy");
+      const reportsDownloadFill = document.getElementById("reports-download-fill");
+      const reportsDownloadStage = document.getElementById("reports-download-stage");
       let currentPage = 1;
+      let progressStageTimer = null;
+      let progressFillTimer = null;
 
       function getFilteredRows() {
         const query = (reportsSearchInput.value || "").trim().toLowerCase();
@@ -326,6 +358,139 @@
       reportsNextPage.addEventListener("click", () => {
         currentPage += 1;
         renderReportsTable();
+      });
+
+      function clearProgressTimers() {
+        if (progressStageTimer) {
+          window.clearInterval(progressStageTimer);
+          progressStageTimer = null;
+        }
+        if (progressFillTimer) {
+          window.clearInterval(progressFillTimer);
+          progressFillTimer = null;
+        }
+      }
+
+      function parseDownloadFilename(dispositionHeader) {
+        if (!dispositionHeader) {
+          return "";
+        }
+
+        const utf8Match = dispositionHeader.match(/filename\*=UTF-8''([^;]+)/i);
+        if (utf8Match && utf8Match[1]) {
+          try {
+            return decodeURIComponent(utf8Match[1]);
+          } catch {
+            return utf8Match[1];
+          }
+        }
+
+        const quotedMatch = dispositionHeader.match(/filename=\"([^\"]+)\"/i);
+        if (quotedMatch && quotedMatch[1]) {
+          return quotedMatch[1];
+        }
+
+        const plainMatch = dispositionHeader.match(/filename=([^;]+)/i);
+        return plainMatch && plainMatch[1] ? plainMatch[1].trim() : "";
+      }
+
+      function hideDownloadOverlay() {
+        if (!reportsDownloadOverlay) {
+          return;
+        }
+        reportsDownloadOverlay.hidden = true;
+        document.body.classList.remove("modal-open", "progress-open");
+      }
+
+      function showDownloadOverlay() {
+        if (!reportsDownloadOverlay || !reportsDownloadTitle || !reportsDownloadCopy || !reportsDownloadFill || !reportsDownloadStage) {
+          return;
+        }
+
+        clearProgressTimers();
+        reportsDownloadTitle.textContent = "Preparing report export";
+        reportsDownloadCopy.textContent = "Building the latest CSV report and starting the download.";
+        reportsDownloadStage.textContent = "Loading report rows";
+        reportsDownloadFill.style.width = "12%";
+        reportsDownloadOverlay.hidden = false;
+        document.body.classList.add("modal-open", "progress-open");
+
+        const stages = [
+          "Loading report rows",
+          "Preparing CSV export",
+          "Starting your download",
+        ];
+        let stageIndex = 0;
+        let progressValue = 12;
+
+        progressStageTimer = window.setInterval(() => {
+          if (stageIndex < stages.length - 1) {
+            stageIndex += 1;
+          }
+          reportsDownloadStage.textContent = stages[stageIndex];
+        }, 2000);
+
+        progressFillTimer = window.setInterval(() => {
+          const cap = stageIndex >= stages.length - 1 ? 94 : 88;
+          progressValue = Math.min(progressValue + 6, cap);
+          reportsDownloadFill.style.width = `${progressValue}%`;
+        }, 700);
+      }
+
+      async function startReportDownload(link) {
+        if (!link || link.dataset.downloading === "true") {
+          return;
+        }
+
+        link.dataset.downloading = "true";
+        link.classList.add("is-busy");
+        link.setAttribute("aria-disabled", "true");
+        showDownloadOverlay();
+
+        try {
+          const response = await fetch(link.href, {
+            method: "GET",
+            credentials: "same-origin",
+          });
+          if (!response.ok) {
+            throw new Error(`Download failed with status ${response.status}`);
+          }
+
+          const dispositionHeader = response.headers.get("content-disposition") || "";
+          if (!/attachment/i.test(dispositionHeader)) {
+            throw new Error("Unexpected download response");
+          }
+
+          const blob = await response.blob();
+          const filename = parseDownloadFilename(dispositionHeader) || "job-report.csv";
+          const downloadUrl = window.URL.createObjectURL(blob);
+          const downloadLink = document.createElement("a");
+          downloadLink.href = downloadUrl;
+          downloadLink.download = filename;
+          document.body.appendChild(downloadLink);
+          downloadLink.click();
+          downloadLink.remove();
+          window.setTimeout(() => {
+            window.URL.revokeObjectURL(downloadUrl);
+          }, 1000);
+        } catch (error) {
+          window.location.assign(link.href);
+          return;
+        } finally {
+          link.dataset.downloading = "false";
+          link.classList.remove("is-busy");
+          link.removeAttribute("aria-disabled");
+          window.setTimeout(() => {
+            hideDownloadOverlay();
+          }, 250);
+        }
+      }
+
+      reportDownloadLinks.forEach((link) => {
+        link.addEventListener("click", (event) => {
+          event.preventDefault();
+          startReportDownload(link);
+        });
       });
 
       renderReportsTable();

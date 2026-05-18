@@ -19,11 +19,12 @@ Implemented in the repository right now:
 - CSV report generation/export for completed, failed, and partial-error jobs
 - Session-scoped encrypted REDCap API key cache for the active authenticated session
 - Jobs page limited to latest requests, with older reports surfaced on Reports
+- Redis/Celery worker scaffold added to Docker Compose and now backs background job execution
 
 Still intentionally pending / not yet aligned to the target architecture:
 
-- Celery + Redis worker infrastructure
-- True resumable/distributed job execution
+- Worker orchestration now supports active cancellation, but there is still no resume/restart-in-place flow for interrupted work
+- Deeper resumable/distributed execution guarantees beyond the current Celery + DB state model
 - Next.js frontend replacement for the current Jinja UI
 - Broader automated test coverage
 
@@ -36,7 +37,7 @@ Still intentionally pending / not yet aligned to the target architecture:
 ### Assumptions (clearly labeled)
 
 - **Hosting** (confirmed): On your own server (Linux VM(s) or bare metal) with Docker/Compose; no reliance on managed cloud services.
-- **REDCap tokens / API keys** (updated): Long-term storage is still disallowed. The current implementation temporarily stores the supplied API key in a **session-scoped encrypted cache** so the same authenticated user can process additional jobs in the same session without re-entering it every time.
+- **REDCap tokens / API keys** (updated): Long-term storage is still disallowed. The current implementation temporarily stores the supplied API key in a **session-scoped encrypted cache** so the same authenticated user can process additional jobs in the same session without re-entering it every time. Background workers do not receive the raw key over the queue; the API and worker must share the same `REDCAP_API_KEY_CACHE_SECRET` to decrypt the short-lived cache safely.
 - **REDCap API URL**: The REDCap API/base URL may be stored for host-level throttling, job auditability, and project history.
 - **Users**: Created only by Admin/Super Admin; no public sign-up.
 - **Projects**: Multiple REDCap projects over time; the system must key mappings to a stable project identifier (see below).

@@ -180,7 +180,7 @@
                               <span
                                 class="loader-spinner loader-spinner-small"
                                 data-progress-loader
-                                {% if row.job.status.value not in ["queued", "running", "waiting_due_to_rate_limit"] %}hidden{% endif %}
+                                {% if row.job.status.value not in ["queued", "running", "waiting_due_to_rate_limit", "cancel_requested"] %}hidden{% endif %}
                                 aria-hidden="true"
                               ></span>
                             </div>
@@ -204,7 +204,16 @@
                       <td>
                         <span class="status-pill {{ row.status_tone }}" data-job-status-pill>{{ row.status_label }}</span>
                       </td>
-                      <td>{{ row.job.total_rows }}</td>
+                      <td>
+                        <strong>{{ row.job.total_rows }}</strong>
+                        {% if row.result_stats %}
+                          <div class="job-result-stats">
+                            {% for stat in row.result_stats %}
+                              <span class="job-result-stat">{{ stat }}</span>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+                      </td>
                       <td>
                         {% if row.review_count %}
                           {{ row.review_count }} form{{ "s" if row.review_count != 1 else "" }}
@@ -215,9 +224,9 @@
                       <td data-job-updated>{{ row.job.updated_at.strftime("%d %b %Y %H:%M") }}</td>
                       <td class="actions-column">
                         <div class="table-actions">
-                          {% if row.report_href and (row.action_kind == "process" or row.action_kind == "process_cached") %}
+                          {% if row.action_kind or row.cancel_label or row.remap_label or row.report_href %}
                             <details class="job-action-menu">
-                              <summary class="manage-button">Actions</summary>
+                              <summary class="manage-button">Action</summary>
                               <div class="job-action-menu-list">
                                 {% if row.action_kind == "process_cached" %}
                                   <form
@@ -231,7 +240,7 @@
                                   >
                                     <button type="submit" class="job-action-menu-button">{{ row.action_label }}</button>
                                   </form>
-                                {% else %}
+                                {% elif row.action_kind == "process" %}
                                   <button
                                     type="button"
                                     class="job-action-menu-button"
@@ -242,50 +251,64 @@
                                   >
                                     {{ row.action_label }}
                                   </button>
+                                {% elif row.action_kind == "download" %}
+                                  <a
+                                    class="job-action-menu-link"
+                                    href="{{ row.action_href }}"
+                                    data-report-download
+                                  >
+                                    {{ row.action_label }}
+                                  </a>
+                                {% elif row.action_kind == "link" %}
+                                  <a class="job-action-menu-link" href="{{ row.action_href }}">{{ row.action_label }}</a>
                                 {% endif %}
-                                <a class="job-action-menu-link" href="{{ row.report_href }}">Export Report</a>
+
+                                {% if row.remap_label %}
+                                  <form
+                                    action="/mappings/{{ row.job.id }}/refresh"
+                                    method="post"
+                                    class="job-action-menu-form"
+                                    data-progress-submit
+                                    data-progress-mode="background"
+                                    data-progress-mode-label="Refreshing Metadata"
+                                    data-progress-title="Refreshing mapping options"
+                                    data-progress-copy="Fetching the latest REDCap metadata and rebuilding the saved field matches for this job."
+                                    data-progress-mode-copy="REDCap refresh: Keep this page open while the latest metadata and mapping options are loaded."
+                                    data-progress-stages="Connecting to REDCap|Loading project metadata|Rebuilding mapping options|Refreshing the Jobs page"
+                                  >
+                                    <input type="hidden" name="return_to" value="jobs" />
+                                    <button type="submit" class="job-action-menu-button">{{ row.remap_label }}</button>
+                                  </form>
+                                {% endif %}
+
+                                {% if row.continue_label %}
+                                  <form action="/jobs/{{ row.job.id }}/use-existing-mappings" method="post" class="job-action-menu-form">
+                                    <button type="submit" class="job-action-menu-button">{{ row.continue_label }}</button>
+                                  </form>
+                                {% endif %}
+
+                                {% if row.cancel_label %}
+                                  <form action="/jobs/{{ row.job.id }}/cancel" method="post" class="job-action-menu-form">
+                                    <button type="submit" class="job-action-menu-button">{{ row.cancel_label }}</button>
+                                  </form>
+                                {% endif %}
+
+                                {% if row.report_href and row.action_kind != "download" %}
+                                  <a
+                                    class="job-action-menu-link"
+                                    href="{{ row.report_href }}"
+                                    data-report-download
+                                  >
+                                    Export Report
+                                  </a>
+                                {% endif %}
                               </div>
                             </details>
-                          {% elif row.action_kind == "link" %}
-                            <a class="manage-button" href="{{ row.action_href }}">{{ row.action_label }}</a>
-                          {% elif row.action_kind == "download" %}
-                            <a class="manage-button" href="{{ row.action_href }}">{{ row.action_label }}</a>
-                          {% elif row.action_kind == "process_cached" %}
-                            <form
-                              action="/jobs/{{ row.job.id }}/process"
-                              method="post"
-                              class="inline-form"
-                              data-progress-submit
-                              data-progress-title="Starting request processing"
-                              data-progress-mode="{{ row.launch_mode or 'background' }}"
-                              data-progress-stages="Checking REDCap access|Loading project details|Processing request rows|Finalising results"
-                            >
-                              <button type="submit" class="manage-button">{{ row.action_label }}</button>
-                            </form>
-                          {% elif row.action_kind == "process" %}
-                            <button
-                              type="button"
-                              class="manage-button"
-                              data-open-process-modal
-                              data-job-id="{{ row.job.id }}"
-                              data-job-label="{{ row.job.request_file_name or 'Imported request' }}"
-                              data-job-launch-mode="{{ row.launch_mode or 'background' }}"
-                            >
-                              {{ row.action_label }}
-                            </button>
-                          {% endif %}
-
-                          {% if row.cancel_label %}
-                            <form action="/jobs/{{ row.job.id }}/cancel" method="post" class="inline-form">
-                              <button type="submit" class="manage-button manage-button-secondary">{{ row.cancel_label }}</button>
-                            </form>
+                          {% else %}
+                            <span class="compact-copy">No actions</span>
                           {% endif %}
 
                           <p class="compact-copy" data-job-action-hint>{{ row.action_hint }}</p>
-
-                          {% if row.report_href and row.action_kind != "download" and row.action_kind != "process" and row.action_kind != "process_cached" %}
-                            <p class="compact-copy"><a href="{{ row.report_href }}">Export report</a></p>
-                          {% endif %}
                         </div>
                       </td>
                     </tr>
@@ -404,8 +427,9 @@
     const openProcessButtons = Array.from(document.querySelectorAll("[data-open-process-modal]"));
     const modalCloseButtons = Array.from(document.querySelectorAll("[data-close-modal]"));
     const progressForms = Array.from(document.querySelectorAll("[data-progress-submit]"));
+    const reportDownloadLinks = Array.from(document.querySelectorAll("[data-report-download]"));
     const jobProgressRows = Array.from(document.querySelectorAll("[data-job-row]"));
-    const ACTIVE_JOB_STATUSES = ["queued", "running", "waiting_due_to_rate_limit"];
+    const ACTIVE_JOB_STATUSES = ["queued", "running", "waiting_due_to_rate_limit", "cancel_requested"];
     let progressStageTimer = null;
     let progressFillTimer = null;
     let progressPollTimer = null;
@@ -482,10 +506,14 @@
       if (!importRequestCard || !toggleImportButton) {
         return;
       }
+      const actionMenu = toggleImportButton.closest("details");
       if (importRequestCard.hidden) {
         openImportCard();
       } else {
         closeImportCard();
+      }
+      if (actionMenu) {
+        actionMenu.open = false;
       }
     });
 
@@ -587,10 +615,15 @@
       clearProgressTimers();
       hideProgressDisplays();
 
-      progressDisplay.modeLabel.textContent = modeConfig.label;
+      const customModeLabel = form.dataset.progressModeLabel || "";
+      const customModeCopy = form.dataset.progressModeCopy || "";
+      const resolvedModeLabel = customModeLabel || modeConfig.label;
+      const resolvedModeCopy = customModeCopy || modeConfig.copy;
+
+      progressDisplay.modeLabel.textContent = resolvedModeLabel;
       progressDisplay.title.textContent = form.dataset.progressTitle || "Working on your request";
-      progressDisplay.copy.textContent = form.dataset.progressCopy || modeConfig.copy;
-      progressDisplay.modeCopy.textContent = modeConfig.copy;
+      progressDisplay.copy.textContent = form.dataset.progressCopy || resolvedModeCopy;
+      progressDisplay.modeCopy.textContent = resolvedModeCopy;
       progressDisplay.stage.textContent = stages[0] || "Preparing request";
       progressDisplay.fill.style.width = `${progressValue}%`;
       progressDisplay.container.hidden = false;
@@ -614,6 +647,117 @@
       }, 700);
     }
 
+    function parseDownloadFilename(dispositionHeader) {
+      if (!dispositionHeader) {
+        return "";
+      }
+
+      const utf8Match = dispositionHeader.match(/filename\*=UTF-8''([^;]+)/i);
+      if (utf8Match && utf8Match[1]) {
+        try {
+          return decodeURIComponent(utf8Match[1]);
+        } catch {
+          return utf8Match[1];
+        }
+      }
+
+      const quotedMatch = dispositionHeader.match(/filename=\"([^\"]+)\"/i);
+      if (quotedMatch && quotedMatch[1]) {
+        return quotedMatch[1];
+      }
+
+      const plainMatch = dispositionHeader.match(/filename=([^;]+)/i);
+      return plainMatch && plainMatch[1] ? plainMatch[1].trim() : "";
+    }
+
+    function showReportDownloadProgress() {
+      clearProgressTimers();
+      hideProgressDisplays();
+
+      submissionProgressModeLabel.textContent = "Exporting Report";
+      submissionProgressTitle.textContent = "Preparing report export";
+      submissionProgressCopy.textContent = "Building the latest CSV report for this job and starting the download.";
+      submissionProgressModeCopy.textContent = "Report export: Keep this page open while the CSV file is prepared.";
+      submissionProgressStage.textContent = "Loading report rows";
+      submissionProgressFill.style.width = "12%";
+      submissionProgressOverlay.hidden = false;
+      document.body.classList.add("modal-open", "progress-open");
+
+      const stages = [
+        "Loading report rows",
+        "Preparing CSV export",
+        "Starting your download",
+      ];
+      let stageIndex = 0;
+      let progressValue = 12;
+
+      progressStageTimer = window.setInterval(() => {
+        if (stageIndex < stages.length - 1) {
+          stageIndex += 1;
+        }
+        submissionProgressStage.textContent = stages[stageIndex];
+      }, 2000);
+
+      progressFillTimer = window.setInterval(() => {
+        const cap = stageIndex >= stages.length - 1 ? 94 : 88;
+        progressValue = Math.min(progressValue + 6, cap);
+        submissionProgressFill.style.width = `${progressValue}%`;
+      }, 700);
+    }
+
+    async function startReportDownload(link) {
+      if (!link || link.dataset.downloading === "true") {
+        return;
+      }
+
+      link.dataset.downloading = "true";
+      link.classList.add("is-busy");
+      link.setAttribute("aria-disabled", "true");
+      const actionMenu = link.closest("details");
+      if (actionMenu) {
+        actionMenu.open = false;
+      }
+      showReportDownloadProgress();
+
+      try {
+        const response = await fetch(link.href, {
+          method: "GET",
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          throw new Error(`Download failed with status ${response.status}`);
+        }
+
+        const dispositionHeader = response.headers.get("content-disposition") || "";
+        if (!/attachment/i.test(dispositionHeader)) {
+          throw new Error("Unexpected download response");
+        }
+
+        const blob = await response.blob();
+        const filename = parseDownloadFilename(dispositionHeader) || "job-report.csv";
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const downloadLink = document.createElement("a");
+        downloadLink.href = downloadUrl;
+        downloadLink.download = filename;
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        downloadLink.remove();
+        window.setTimeout(() => {
+          window.URL.revokeObjectURL(downloadUrl);
+        }, 1000);
+      } catch (error) {
+        window.location.assign(link.href);
+        return;
+      } finally {
+        link.dataset.downloading = "false";
+        link.classList.remove("is-busy");
+        link.removeAttribute("aria-disabled");
+        window.setTimeout(() => {
+          hideProgressDisplays();
+        }, 250);
+      }
+    }
+
     progressForms.forEach((form) => {
       form.addEventListener("submit", (event) => {
         if (form.dataset.submitting === "true") {
@@ -624,6 +768,13 @@
         form.dataset.submitting = "true";
         setButtonsBusy(form);
         showSubmissionProgress(form);
+      });
+    });
+
+    reportDownloadLinks.forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        startReportDownload(link);
       });
     });
 

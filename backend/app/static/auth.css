@@ -1236,6 +1236,13 @@ body.sidebar-collapsed .sidebar-button-label {
   background: rgba(201, 88, 78, 0.08);
 }
 
+.manage-button.is-busy,
+.job-action-menu-link.is-busy {
+  opacity: 0.72;
+  pointer-events: none;
+  cursor: progress;
+}
+
 .datatable-footer {
   display: flex;
   align-items: center;
@@ -1281,6 +1288,26 @@ body.sidebar-collapsed .sidebar-button-label {
 .jobs-review-table strong {
   color: var(--heading);
   font-size: 0.95rem;
+}
+
+.job-result-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.job-result-stat {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.65rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(228, 233, 242, 0.72);
+  color: #516072;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.1;
 }
 
 .jobs-empty-state {
@@ -1335,6 +1362,13 @@ body.sidebar-collapsed .sidebar-button-label {
   outline: none;
   border-color: rgba(99, 210, 199, 0.8);
   box-shadow: 0 0 0 3px rgba(99, 210, 199, 0.14);
+}
+
+.mapping-input-help {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
 .modal-backdrop {

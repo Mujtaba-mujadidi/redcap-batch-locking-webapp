@@ -1,4 +1,4 @@
-# Phase 4 backend image with API + migrations. Workers/Redis/frontend come later.
+# Phase 5 backend image with API + worker scaffold. Frontend remains in later phases.
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,6 +15,10 @@ COPY app ./app
 COPY scripts ./scripts
 
 RUN chmod +x ./scripts/*.sh
+RUN addgroup --system app && adduser --system --ingroup app appuser
+RUN chown -R appuser:app /app
+
+USER appuser
 
 EXPOSE 8000
 
