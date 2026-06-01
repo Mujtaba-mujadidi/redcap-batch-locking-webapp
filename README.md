@@ -19,27 +19,30 @@ The repository now includes:
   - REDCap preflight validation and metadata fetch
 - Mapping review flow for lock-status fields, lock-date fields, and per-instrument confirmation
 - Background job execution for lock/unlock processing with inline progress updates on the Jobs page
+- Real REDCap mapping refresh flow, saved-mapping reuse decisions, and improved checkbox choice inference/prefill in mapping review
 - Project-scoped REDCap API rate limiting with visible wait/resume messaging
 - CSV report generation and export for completed, partial-error, and failed jobs
 - Session-scoped encrypted REDCap API key cache so repeat processing in the same session does not always prompt again
-- Docker Compose for API + PostgreSQL + Redis + Celery worker scaffold
+- Docker Compose for API + PostgreSQL + Redis + Celery worker-backed background processing
 
 ## Implemented snapshot
 
-As of 15 April 2026, the app supports the following end-to-end workflow:
+As of 19 May 2026, the app supports the following end-to-end workflow:
 
 1. User signs in and opens the Jobs page.
 2. User exports the request template or imports a request package.
 3. Import preflight validates the request CSV, checks REDCap connectivity, fetches metadata, inspects optional unresolved queries CSV content, and creates a draft job.
-4. If field detection is ambiguous or missing, the user confirms mappings on the Mappings page.
-5. The job can then be processed in the background from the Jobs page.
-6. The UI shows background progress, processed row counts, and REDCap rate-limit wait/resume state.
-7. A CSV execution report can be exported from Jobs or Reports once processing finishes.
+4. If the REDCap project already has saved mappings, the user can either refresh mappings from live REDCap metadata or continue with the saved mapping set.
+5. If field detection is ambiguous or missing, the user confirms mappings on the Mappings page.
+6. Small jobs can run live in the browser session, while larger jobs run in the background through Celery workers.
+7. The UI shows processing progress, processed row counts, row outcome summaries, and REDCap rate-limit wait/resume state.
+8. A CSV execution report can be exported from Jobs or Reports once processing finishes.
 
 ## Current gaps / next major work
 
 - Background execution now runs through Celery + Redis instead of in-process threads.
 - Active cancellation now exists for queued/running jobs, but there is still no resume/restart-in-place flow for interrupted work.
+- Admin 2FA is still not implemented.
 - The UI is still FastAPI/Jinja based; the planned Next.js frontend is not built.
 - Automated test coverage is still limited.
 

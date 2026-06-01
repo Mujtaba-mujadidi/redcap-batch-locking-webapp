@@ -2,7 +2,7 @@
 
 Living architecture and delivery plan for this repository. Update this file as decisions change.
 
-## Progress snapshot — 15 April 2026
+## Progress snapshot — 19 May 2026
 
 Implemented in the repository right now:
 
@@ -13,18 +13,25 @@ Implemented in the repository right now:
   - REDCap API URL / API key intake
   - optional existing queries CSV import
   - REDCap preflight checks and metadata discovery
-- Instrument mapping detection plus manual mapping confirmation UI
-- Background lock/unlock job processing from the Jobs page
+- Instrument mapping detection plus manual mapping confirmation UI, including:
+  - project-level mapping reuse
+  - explicit refresh/use-existing decision when a project already has saved mappings
+  - real REDCap metadata/codebook re-fetch on refresh
+  - improved checkbox choice inference and prefilled review values
+- Small-job live processing and background lock/unlock job processing from the Jobs page
 - Project-scoped REDCap API rate limiting with visible wait-state messaging
-- CSV report generation/export for completed, failed, and partial-error jobs
-- Session-scoped encrypted REDCap API key cache for the active authenticated session
+- Redis/Celery-backed background execution with cooperative cancellation for queued/running jobs
+- CSV report generation/export for completed, failed, cancelled, and partial-error jobs
+- Session-scoped encrypted REDCap API key cache for the active authenticated session, safely re-used by background workers through a shared cache secret
 - Jobs page limited to latest requests, with older reports surfaced on Reports
-- Redis/Celery worker scaffold added to Docker Compose and now backs background job execution
+- Export/download loaders for processing, mapping refresh, and report generation actions
+- Jobs page outcome summaries and page-load performance improvements by removing report regeneration from the normal page render path
 
 Still intentionally pending / not yet aligned to the target architecture:
 
 - Worker orchestration now supports active cancellation, but there is still no resume/restart-in-place flow for interrupted work
 - Deeper resumable/distributed execution guarantees beyond the current Celery + DB state model
+- Admin 2FA is still not implemented
 - Next.js frontend replacement for the current Jinja UI
 - Broader automated test coverage
 
