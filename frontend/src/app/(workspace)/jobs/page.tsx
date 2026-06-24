@@ -10,7 +10,7 @@ type JobsPageProps = {
 };
 
 export default async function JobsPage({ searchParams }: JobsPageProps) {
-  const jobs = await fetchBackendJson<JobsList>("/api/v1/jobs?limit=25");
+  const jobs = await fetchBackendJson<JobsList>("/api/v1/jobs?limit=3");
   const params = (await searchParams) || {};
   const initialBanner = params.success
     ? { tone: "success" as const, message: decodeURIComponent(params.success) }

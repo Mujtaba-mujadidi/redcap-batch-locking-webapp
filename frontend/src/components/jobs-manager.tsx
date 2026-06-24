@@ -31,6 +31,18 @@ function processModeLabel(mode: string | null): string {
   return mode === "live" ? "Live in this browser session" : "Background worker";
 }
 
+function isTerminalJob(status: string): boolean {
+  return ["completed", "cancelled", "failed"].includes(status);
+}
+
+function reviewLabel(reviewCount: number): string {
+  if (!reviewCount) {
+    return "No review required";
+  }
+
+  return `${reviewCount} form${reviewCount === 1 ? "" : "s"} to review`;
+}
+
 function ModalFrame({
   children,
   isOpen,
@@ -71,6 +83,7 @@ export function JobsManager({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [processJob, setProcessJob] = useState<JobListItem | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
+  const visibleJobs = jobs.slice(0, 3);
 
   useEffect(() => {
     setJobs(initialJobs);
@@ -219,7 +232,7 @@ export function JobsManager({
       <PageHeader
         eyebrow="Job Queue"
         title="Jobs"
-        description="Review the latest requests, run pre-flight import checks, and continue through mapping or execution without leaving the new workspace."
+        description="Track the three most recent requests, re-run imports, and move into mapping or processing from one organised workspace."
         actions={
           <>
             <a className="header-action" href="/api/jobs/template">
@@ -322,11 +335,13 @@ export function JobsManager({
       ) : null}
 
       <section className="panel-card data-table-card">
-        <div className="panel-card-header">
+        <div className="panel-card-header jobs-panel-header">
           <div>
-            <p className="mini-label">Job Queue</p>
-            <h3>Latest 25 requests</h3>
-            <p className="compact-copy">Older generated exports continue to live in the Reports tab.</p>
+            <p className="mini-label">Recent Activity</p>
+            <h3>Last 3 requests</h3>
+            <p className="compact-copy">
+              This page stays focused on the latest work. Older generated exports continue to live in the Reports tab.
+            </p>
           </div>
         </div>
 
@@ -336,170 +351,207 @@ export function JobsManager({
           </div>
         ) : null}
 
-        {jobs.length ? (
+        {visibleJobs.length ? (
           <div className="table-shell">
             <table className="data-table jobs-review-table">
               <thead>
                 <tr>
                   <th>Request</th>
                   <th>Status</th>
-                  <th>Rows</th>
-                  <th>Forms Requiring Review</th>
+                  <th>Progress</th>
+                  <th>Results</th>
                   <th>Updated</th>
                   <th className="actions-column">Action</th>
                 </tr>
               </thead>
               <tbody>
-                {jobs.map((job) => (
-                  <tr key={job.id}>
-                    <td>
-                      <strong>{job.request_file_name || "Imported request"}</strong>
-                      <p className="compact-copy">
-                        {job.project_title || "Untitled project"}
-                        {job.project_id ? ` · Project ${job.project_id}` : ""}
-                      </p>
-                      <p className="compact-copy">{job.host_label}</p>
-                      <p className="compact-copy">
-                        Rate limit: {job.progress.rate_limit_per_minute} calls/min for this REDCap project.
-                      </p>
-                      <div className="job-progress-panel" hidden={!job.progress.message && !job.progress.detail && !job.progress.wait_message}>
-                        <div className="job-progress-header">
-                          <div className="job-progress-summary">
-                            <strong>{job.progress.summary}</strong>
-                            <span
-                              className="loader-spinner loader-spinner-small"
-                              hidden={!["queued", "running", "waiting_due_to_rate_limit", "cancel_requested"].includes(job.status)}
-                              aria-hidden="true"
-                            ></span>
+                {visibleJobs.map((job) => {
+                  const terminalJob = isTerminalJob(job.status);
+                  const showProgressPanel =
+                    Boolean(job.progress.summary) ||
+                    Boolean(job.progress.message) ||
+                    Boolean(job.progress.detail) ||
+                    Boolean(job.progress.wait_message);
+
+                  return (
+                    <tr key={job.id}>
+                      <td>
+                        <div className="job-request-cell">
+                          <strong className="job-request-name">
+                            {job.request_file_name || "Imported request"}
+                          </strong>
+                          <p className="compact-copy">
+                            {job.project_title || "Untitled project"}
+                            {job.project_id ? ` · Project ${job.project_id}` : ""}
+                          </p>
+                          <div className="job-request-badges">
+                            {job.host_label ? (
+                              <span className="job-info-pill">{job.host_label}</span>
+                            ) : null}
+                            <span className="job-info-pill">
+                              {job.progress.rate_limit_per_minute} calls/min
+                            </span>
                           </div>
-                          <span className="compact-copy">{job.progress.percent}%</span>
                         </div>
-                        <div className="job-progress-track" aria-hidden="true">
-                          <div className="job-progress-fill" style={{ width: `${job.progress.percent}%` }}></div>
-                        </div>
-                        {job.progress.message ? <p className="compact-copy">{job.progress.message}</p> : null}
-                        {job.progress.wait_message ? (
-                          <p className="compact-copy job-progress-wait">{job.progress.wait_message}</p>
-                        ) : null}
-                        {job.progress.detail ? <p className="compact-copy">{job.progress.detail}</p> : null}
-                      </div>
-                    </td>
-                    <td>
-                      <StatusPill status={job.status} label={job.status_label} toneClassName={job.status_tone} />
-                    </td>
-                    <td>
-                      <strong>{job.total_rows}</strong>
-                      <div className="job-result-stats">
-                        <span className="job-result-stat">{job.locked_rows} locked</span>
-                        <span className="job-result-stat">{job.unlocked_rows} unlocked</span>
-                        <span className="job-result-stat">{job.failed_rows} failed</span>
-                      </div>
-                    </td>
-                    <td>
-                      {job.review_count ? `${job.review_count} form${job.review_count === 1 ? "" : "s"}` : <span className="compact-copy">None</span>}
-                    </td>
-                    <td>{formatDate(job.updated_at)}</td>
-                    <td className="actions-column">
-                      <div className="table-actions">
-                        {job.action_kind || job.cancel_label || job.continue_label || job.remap_label || job.report_id ? (
-                          <details className="job-action-menu">
-                            <summary className="manage-button">Action</summary>
-                            <div className="job-action-menu-list">
-                              {job.action_kind === "process" || job.action_kind === "process_cached" ? (
-                                <button
-                                  type="button"
-                                  className="job-action-menu-button"
-                                  onClick={() => {
-                                    setProcessError(null);
-                                    setProcessJob(job);
-                                  }}
-                                >
-                                  {job.action_label || "Process"}
-                                </button>
-                              ) : null}
-
-                              {job.action_kind === "link" ? (
-                                <Link className="job-action-menu-link" href={`/mappings?job_id=${job.id}`}>
-                                  {job.action_label || "Review mappings"}
-                                </Link>
-                              ) : null}
-
-                              {job.action_kind === "download" && job.report_id ? (
-                                <a className="job-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
-                                  {job.action_label || "Export Report"}
-                                </a>
-                              ) : null}
-
-                              {job.remap_label ? (
-                                <button
-                                  type="button"
-                                  className="job-action-menu-button"
-                                  onClick={() => {
-                                    const formData = new FormData();
-                                    formData.set("return_to", "jobs");
-                                    void handleSimpleAction(
-                                      `/api/mappings/${job.id}/refresh`,
-                                      "Mappings refreshed.",
-                                      `refresh-${job.id}`,
-                                      formData,
-                                    );
-                                  }}
-                                >
-                                  {job.remap_label}
-                                </button>
-                              ) : null}
-
-                              {job.continue_label ? (
-                                <button
-                                  type="button"
-                                  className="job-action-menu-button"
-                                  onClick={() => {
-                                    void handleSimpleAction(
-                                      `/api/jobs/${job.id}/use-existing-mappings`,
-                                      "Saved mappings reused.",
-                                      `continue-${job.id}`,
-                                    );
-                                  }}
-                                >
-                                  {job.continue_label}
-                                </button>
-                              ) : null}
-
-                              {job.cancel_label ? (
-                                <button
-                                  type="button"
-                                  className="job-action-menu-button"
-                                  onClick={() => {
-                                    void handleSimpleAction(
-                                      `/api/jobs/${job.id}/cancel`,
-                                      "Cancellation requested.",
-                                      `cancel-${job.id}`,
-                                    );
-                                  }}
-                                >
-                                  {job.cancel_label}
-                                </button>
-                              ) : null}
-
-                              {job.report_id && job.action_kind !== "download" ? (
-                                <a className="job-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
-                                  Export Report
-                                </a>
+                      </td>
+                      <td className="job-status-cell">
+                        <StatusPill status={job.status} label={job.status_label} toneClassName={job.status_tone} />
+                        {job.action_hint ? <p className="compact-copy">{job.action_hint}</p> : null}
+                      </td>
+                      <td>
+                        {showProgressPanel ? (
+                          <div className="job-progress-panel">
+                            <div className="job-progress-header">
+                              <div className="job-progress-summary">
+                                <strong>{job.progress.summary}</strong>
+                                <span
+                                  className="loader-spinner loader-spinner-small"
+                                  hidden={
+                                    ![
+                                      "queued",
+                                      "running",
+                                      "waiting_due_to_rate_limit",
+                                      "cancel_requested",
+                                    ].includes(job.status)
+                                  }
+                                  aria-hidden="true"
+                                ></span>
+                              </div>
+                              {!terminalJob ? (
+                                <span className="compact-copy">{job.progress.percent}%</span>
                               ) : null}
                             </div>
-                          </details>
+                            {!terminalJob ? (
+                              <div className="job-progress-track" aria-hidden="true">
+                                <div
+                                  className="job-progress-fill"
+                                  style={{ width: `${job.progress.percent}%` }}
+                                ></div>
+                              </div>
+                            ) : null}
+                            {job.progress.message ? <p className="compact-copy">{job.progress.message}</p> : null}
+                            {job.progress.wait_message ? (
+                              <p className="compact-copy job-progress-wait">{job.progress.wait_message}</p>
+                            ) : null}
+                            {job.progress.detail ? <p className="compact-copy">{job.progress.detail}</p> : null}
+                          </div>
                         ) : (
-                          <span className="compact-copy">No actions</span>
+                          <p className="compact-copy">No live progress to show.</p>
                         )}
+                      </td>
+                      <td>
+                        <div className="job-results-cell">
+                          <strong className="job-results-total">{job.total_rows} rows</strong>
+                          <div className="job-result-stats">
+                            <span className="job-result-stat">{job.locked_rows} locked</span>
+                            <span className="job-result-stat">{job.unlocked_rows} unlocked</span>
+                            <span className="job-result-stat">{job.failed_rows} failed</span>
+                          </div>
+                          <p className="compact-copy">{reviewLabel(job.review_count)}</p>
+                        </div>
+                      </td>
+                      <td className="job-updated-cell">{formatDate(job.updated_at)}</td>
+                      <td className="actions-column job-actions-cell">
+                        <div className="table-actions">
+                          {job.action_kind || job.cancel_label || job.continue_label || job.remap_label || job.report_id ? (
+                            <details className="job-action-menu">
+                              <summary className="manage-button">Action</summary>
+                              <div className="job-action-menu-list">
+                                {job.action_kind === "process" || job.action_kind === "process_cached" ? (
+                                  <button
+                                    type="button"
+                                    className="job-action-menu-button"
+                                    onClick={() => {
+                                      setProcessError(null);
+                                      setProcessJob(job);
+                                    }}
+                                  >
+                                    {job.action_label || "Process"}
+                                  </button>
+                                ) : null}
 
-                        <p className="compact-copy">{job.action_hint}</p>
-                        {job.status !== "completed" && job.status !== "cancelled" ? (
-                          <span className="table-note">{formatStatus(job.job_type)}</span>
-                        ) : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                                {job.action_kind === "link" ? (
+                                  <Link className="job-action-menu-link" href={`/mappings?job_id=${job.id}`}>
+                                    {job.action_label || "Review mappings"}
+                                  </Link>
+                                ) : null}
+
+                                {job.action_kind === "download" && job.report_id ? (
+                                  <a className="job-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
+                                    {job.action_label || "Export Report"}
+                                  </a>
+                                ) : null}
+
+                                {job.remap_label ? (
+                                  <button
+                                    type="button"
+                                    className="job-action-menu-button"
+                                    onClick={() => {
+                                      const formData = new FormData();
+                                      formData.set("return_to", "jobs");
+                                      void handleSimpleAction(
+                                        `/api/mappings/${job.id}/refresh`,
+                                        "Mappings refreshed.",
+                                        `refresh-${job.id}`,
+                                        formData,
+                                      );
+                                    }}
+                                  >
+                                    {job.remap_label}
+                                  </button>
+                                ) : null}
+
+                                {job.continue_label ? (
+                                  <button
+                                    type="button"
+                                    className="job-action-menu-button"
+                                    onClick={() => {
+                                      void handleSimpleAction(
+                                        `/api/jobs/${job.id}/use-existing-mappings`,
+                                        "Saved mappings reused.",
+                                        `continue-${job.id}`,
+                                      );
+                                    }}
+                                  >
+                                    {job.continue_label}
+                                  </button>
+                                ) : null}
+
+                                {job.cancel_label ? (
+                                  <button
+                                    type="button"
+                                    className="job-action-menu-button"
+                                    onClick={() => {
+                                      void handleSimpleAction(
+                                        `/api/jobs/${job.id}/cancel`,
+                                        "Cancellation requested.",
+                                        `cancel-${job.id}`,
+                                      );
+                                    }}
+                                  >
+                                    {job.cancel_label}
+                                  </button>
+                                ) : null}
+
+                                {job.report_id && job.action_kind !== "download" ? (
+                                  <a className="job-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
+                                    Export Report
+                                  </a>
+                                ) : null}
+                              </div>
+                            </details>
+                          ) : (
+                            <span className="compact-copy">No actions</span>
+                          )}
+
+                          {job.status !== "completed" && job.status !== "cancelled" ? (
+                            <span className="table-note">{formatStatus(job.job_type)}</span>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

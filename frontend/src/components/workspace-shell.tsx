@@ -205,7 +205,7 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
           })}
         </nav>
 
-        <form action="/api/session/logout" method="post">
+        <form className="sidebar-logout-form" action="/api/session/logout" method="post">
           <button type="submit" className="sidebar-logout">
             <span className="sidebar-button-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24">

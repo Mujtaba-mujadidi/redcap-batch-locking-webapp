@@ -312,6 +312,12 @@ code,
 .sidebar-nav {
   display: grid;
   gap: 0.35rem;
+  align-content: start;
+}
+
+.sidebar-logout-form {
+  margin-top: auto;
+  padding-top: 0.85rem;
 }
 
 .nav-item {
@@ -376,15 +382,21 @@ code,
   justify-content: flex-start;
   gap: 0.7rem;
   width: 100%;
-  margin-top: auto;
-  padding: 0.7rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, #ffffff, #f8fafc);
-  color: var(--muted);
+  padding: 0.78rem 0.9rem;
+  border-radius: 14px;
+  border: 1px solid rgba(201, 88, 78, 0.2);
+  background: linear-gradient(180deg, rgba(255, 244, 243, 0.95), #ffffff);
+  color: #b24d43;
   font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.sidebar-logout:hover {
+  background: linear-gradient(180deg, rgba(255, 236, 233, 0.98), #fff7f5);
+  border-color: rgba(201, 88, 78, 0.3);
+  color: #9d3b32;
 }
 
 .dashboard-main {
@@ -991,6 +1003,10 @@ code,
   margin: 0 1.25rem 1rem;
 }
 
+.jobs-panel-header {
+  align-items: flex-start;
+}
+
 .jobs-empty-state {
   padding: 1.25rem;
 }
@@ -1017,11 +1033,63 @@ code,
 }
 
 .job-progress-panel {
-  margin-top: 0.8rem;
+  display: grid;
+  gap: 0.45rem;
+  min-width: 13rem;
   padding: 0.9rem 1rem;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: linear-gradient(180deg, #fbfcfe, #ffffff);
+}
+
+.jobs-review-table {
+  min-width: 1060px;
+}
+
+.jobs-review-table td {
+  vertical-align: top;
+}
+
+.jobs-review-table tbody tr:hover td {
+  background: rgba(247, 250, 253, 0.92);
+}
+
+.job-request-cell,
+.job-results-cell {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.job-request-name,
+.job-results-total {
+  color: var(--heading);
+}
+
+.job-request-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.job-info-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.7rem;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(232, 238, 246, 0.75);
+  color: #546375;
+  font-size: 0.73rem;
+  font-weight: 700;
+}
+
+.job-status-cell {
+  min-width: 10rem;
+}
+
+.job-status-cell .compact-copy,
+.job-results-cell .compact-copy {
+  margin: 0;
 }
 
 .job-progress-header,
@@ -1052,6 +1120,12 @@ code,
   color: #406ea7;
 }
 
+.job-updated-cell {
+  min-width: 8.4rem;
+  color: #5f6c7f;
+  font-weight: 600;
+}
+
 .loader-spinner {
   display: inline-flex;
   width: 1.15rem;
@@ -1070,10 +1144,12 @@ code,
 
 .job-action-menu {
   position: relative;
+  width: 100%;
 }
 
 .job-action-menu summary {
   list-style: none;
+  width: 100%;
 }
 
 .job-action-menu summary::-webkit-details-marker {
@@ -1083,7 +1159,7 @@ code,
 .job-action-menu-list {
   position: absolute;
   top: calc(100% + 0.45rem);
-  left: 0;
+  right: 0;
   z-index: 20;
   display: grid;
   min-width: 12rem;
@@ -1123,6 +1199,15 @@ code,
 .job-action-menu-button:hover,
 .job-action-menu-link:hover {
   background: #f6f9fc;
+}
+
+.job-actions-cell {
+  min-width: 10.5rem;
+}
+
+.jobs-review-table .manage-button {
+  width: 100%;
+  min-width: 0;
 }
 
 .mapping-summary-grid {
