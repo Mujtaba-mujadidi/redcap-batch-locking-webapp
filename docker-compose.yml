@@ -1,4 +1,4 @@
-# Phase 5: API + Postgres + Redis + worker scaffold. Frontend remains in later phases.
+# Phase 6: separate Next.js frontend with FastAPI API + Postgres + Redis + worker.
 x-backend-env: &backend-env
   PYTHONUNBUFFERED: "1"
   DATABASE_URL: postgresql+psycopg://redcap_app:redcap_app@postgres:5432/redcap_batch_locking
@@ -7,6 +7,11 @@ x-backend-env: &backend-env
   CELERY_RESULT_BACKEND: redis://redis:6379/0
   # Override this in deployment so the API and worker share a stable key-cache secret.
   REDCAP_API_KEY_CACHE_SECRET: ${REDCAP_API_KEY_CACHE_SECRET:-local-dev-redcap-api-key-cache-secret}
+
+x-frontend-env: &frontend-env
+  BACKEND_ORIGIN: http://api:8000
+  NEXT_PUBLIC_BACKEND_ORIGIN: http://localhost:8000
+  NEXT_PUBLIC_LEGACY_APP_URL: http://localhost:8000
 
 services:
   postgres:
@@ -37,6 +42,16 @@ services:
     ports:
       - "8000:8000"
     environment: *backend-env
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    environment: *frontend-env
 
   worker:
     build:

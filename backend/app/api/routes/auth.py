@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_session
@@ -8,7 +9,15 @@ from app.core.config import get_settings
 from app.core.security import utc_now
 from app.db.session import get_db_session
 from app.models.session import UserSession
-from app.schemas.auth import AuthenticatedResponse, AuthSessionRead, AuthUserRead, LoginRequest, LogoutResponse
+from app.models.user import User
+from app.schemas.auth import (
+    AuthenticatedResponse,
+    AuthSessionRead,
+    AuthUserRead,
+    LoginContextResponse,
+    LoginRequest,
+    LogoutResponse,
+)
 from app.services.audit import record_audit_event
 from app.services.auth import authenticate_user, create_user_session, revoke_session
 from app.services.redcap_api_keys import clear_redcap_api_keys_for_session
@@ -115,3 +124,9 @@ def logout(
 @router.get("/me", response_model=AuthenticatedResponse)
 def me(current_session: UserSession = Depends(get_current_session)) -> AuthenticatedResponse:
     return _build_auth_response(current_session)
+
+
+@router.get("/login-context", response_model=LoginContextResponse)
+def login_context(db: Session = Depends(get_db_session)) -> LoginContextResponse:
+    user_count = db.scalar(select(func.count()).select_from(User)) or 0
+    return LoginContextResponse(has_users=user_count > 0, user_count=user_count)

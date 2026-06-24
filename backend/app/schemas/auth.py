@@ -40,3 +40,8 @@ class AuthenticatedResponse(BaseModel):
 
 class LogoutResponse(BaseModel):
     message: str
+
+
+class LoginContextResponse(BaseModel):
+    has_users: bool
+    user_count: int

@@ -9,7 +9,8 @@ Canonical project root for the REDCap batch locking/unlocking web application.
 The repository now includes:
 
 - FastAPI backend with cookie-based authentication and DB-backed sessions
-- Built-in FastAPI-served UI for login, jobs, mappings, reports, and user management
+- Built-in FastAPI-served legacy UI for login, jobs, mappings, reports, and user management
+- Separate Next.js frontend in `frontend/` with shared global CSS and typed API consumption
 - SQLAlchemy models plus Alembic migrations for jobs, mappings, sessions, audit events, reports, and REDCap host configuration
 - Authenticated jobs import flow with:
   - template export
@@ -23,7 +24,7 @@ The repository now includes:
 - Project-scoped REDCap API rate limiting with visible wait/resume messaging
 - CSV report generation and export for completed, partial-error, and failed jobs
 - Session-scoped encrypted REDCap API key cache so repeat processing in the same session does not always prompt again
-- Docker Compose for API + PostgreSQL + Redis + Celery worker-backed background processing
+- Docker Compose for Next.js frontend + API + PostgreSQL + Redis + Celery worker-backed background processing
 
 ## Implemented snapshot
 
@@ -43,7 +44,7 @@ As of 19 May 2026, the app supports the following end-to-end workflow:
 - Background execution now runs through Celery + Redis instead of in-process threads.
 - Active cancellation now exists for queued/running jobs, but there is still no resume/restart-in-place flow for interrupted work.
 - Admin 2FA is still not implemented.
-- The UI is still FastAPI/Jinja based; the planned Next.js frontend is not built.
+- The legacy FastAPI/Jinja UI still exists for complex workflows that have not been fully migrated yet.
 - Automated test coverage is still limited.
 
 ## Backend development
@@ -82,6 +83,29 @@ Use the same `REDCAP_API_KEY_CACHE_SECRET` value for both the API process and th
 - Health: **http://127.0.0.1:8000/health**
 - Docs: **http://127.0.0.1:8000/docs**
 
+## Frontend development
+
+Frontend lives in `frontend/` (Next.js app router). Run:
+
+```bash
+cd frontend
+npm install
+export BACKEND_ORIGIN=http://localhost:8000
+export NEXT_PUBLIC_BACKEND_ORIGIN=http://localhost:8000
+export NEXT_PUBLIC_LEGACY_APP_URL=http://localhost:8000
+npm run dev
+```
+
+- New frontend: **http://localhost:3000/**
+- Login: **http://localhost:3000/login**
+- Overview: **http://localhost:3000/app**
+- Jobs: **http://localhost:3000/jobs**
+- Mappings: **http://localhost:3000/mappings**
+- Reports: **http://localhost:3000/reports**
+- Users: **http://localhost:3000/users**
+
+The Next.js frontend uses a shared global stylesheet in `frontend/src/app/globals.css` and consumes backend JSON endpoints under `/api/v1/...`.
+
 ## Bootstrap the first admin user
 
 After migrations have been applied, create the first user:
@@ -111,7 +135,7 @@ There is now a simple built-in UI for authentication:
 - `/app` renders a protected authenticated page
 - `/` redirects to `/login` or `/app` depending on whether the session cookie is valid
 
-## Docker (Phase 4 — API + Postgres)
+## Docker
 
 From the **project root** (this directory):
 
@@ -119,10 +143,15 @@ From the **project root** (this directory):
 docker compose build
 docker compose up -d postgres
 docker compose run --rm api ./scripts/migrate.sh
-docker compose up api
+docker compose up api frontend
 ```
 
-Same URLs as above. After code changes:
+This brings up:
+
+- Next.js frontend: **http://localhost:3000**
+- FastAPI backend + legacy UI: **http://localhost:8000**
+
+After code changes:
 
 ```bash
 docker compose up --build

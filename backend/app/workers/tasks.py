@@ -1,5 +1,6 @@
 from uuid import UUID
 
+from app.services.job_processing import process_job_in_background
 from app.workers.celery_app import celery_app
 
 
@@ -46,14 +47,9 @@ def process_job(
     retry_row_ids: list[str] | None = None,
 ) -> None:
     """Run a queued job on the Celery worker."""
-
-    from app.ui.router import run_job_processing
-
-    run_job_processing(
-        UUID(job_id),
-        UUID(actor_user_id),
-        "",
-        [UUID(row_id) for row_id in (retry_row_ids or [])],
-        processing_mode="background",
+    process_job_in_background(
+        job_id=UUID(job_id),
+        actor_user_id=UUID(actor_user_id),
         user_session_id=UUID(user_session_id),
+        retry_row_ids=[UUID(row_id) for row_id in (retry_row_ids or [])],
     )
