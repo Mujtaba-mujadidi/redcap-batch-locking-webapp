@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { backendOrigin } from "@/lib/env";
-import { buildAppUrl } from "@/lib/request-url";
+import { createRedirectResponse } from "@/lib/redirect-response";
 
 async function readCredentials(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -39,17 +39,12 @@ export async function POST(request: Request) {
     try {
       const body = (await backendResponse.json()) as { detail?: string };
       errorMessage = body.detail || errorMessage;
-    } catch {
-      // Ignore parse errors and fall back to the generic copy.
-    }
+    } catch {}
 
-    return NextResponse.redirect(
-      buildAppUrl(request, `/login?error=${encodeURIComponent(errorMessage)}`),
-      303,
-    );
+    return createRedirectResponse(`/login?error=${encodeURIComponent(errorMessage)}`);
   }
 
-  const response = NextResponse.redirect(buildAppUrl(request, "/app"), 303);
+  const response = createRedirectResponse("/app");
   const setCookie = backendResponse.headers.get("set-cookie");
   if (setCookie) {
     response.headers.set("set-cookie", setCookie);

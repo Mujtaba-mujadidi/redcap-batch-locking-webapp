@@ -114,9 +114,7 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
     setSidebarCollapsed(nextValue);
     try {
       window.localStorage.setItem("redcap-sidebar-collapsed", nextValue ? "1" : "0");
-    } catch {
-      // Ignore storage write failures and keep the in-memory preference.
-    }
+    } catch {}
   }
 
   return (
