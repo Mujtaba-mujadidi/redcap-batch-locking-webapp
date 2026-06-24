@@ -15,6 +15,7 @@ export type JobStatus =
   | "failed";
 export type MappingConfidence = "high" | "confirm" | "not_found";
 export type MappingStatus = "inferred" | "confirmed" | "stale";
+export type JobActionKind = "process_cached" | "process" | "download" | "link";
 
 export interface AuthUser {
   id: string;
@@ -89,6 +90,15 @@ export interface JobListItem {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  status_label: string;
+  status_tone: string;
+  action_kind: JobActionKind | null;
+  action_label: string | null;
+  action_hint: string;
+  cancel_label: string | null;
+  continue_label: string | null;
+  remap_label: string | null;
+  launch_mode: string | null;
 }
 
 export interface JobsList {
@@ -121,6 +131,56 @@ export interface MappingReview {
   rows: MappingReviewItem[];
 }
 
+export interface MappingFieldOption {
+  field_name: string;
+  field_label: string | null;
+  field_type: string;
+  validation_type: string | null;
+}
+
+export interface MappingFieldCandidate {
+  field_name: string;
+  field_label: string | null;
+  field_type: string;
+  lock_value: string | null;
+  date_format: string | null;
+  validation_type: string | null;
+  note: string | null;
+}
+
+export interface MappingReviewDetailRow {
+  mapping_id: string;
+  instrument_name: string;
+  instrument_label: string;
+  confidence: MappingConfidence;
+  mapping_status: MappingStatus;
+  notes: string[];
+  selected_status_candidate: MappingFieldCandidate | null;
+  selected_date_candidate: MappingFieldCandidate | null;
+  status_options: MappingFieldOption[];
+  date_options: MappingFieldOption[];
+  selected_status_field_name: string;
+  selected_date_field_name: string;
+  selected_status_lock_value: string;
+  selected_status_value_help: string | null;
+  selected_date_format: string;
+}
+
+export interface MappingReviewDetail {
+  job_id: string | null;
+  job_status: string | null;
+  total_rows: number;
+  project_id: string | null;
+  project_title: string | null;
+  host_label: string | null;
+  refresh_decision_pending: boolean;
+  confirmed_mapping_count: number;
+  mapping_none_option: string;
+  mapping_auto_option: string;
+  date_format_options: string[];
+  rows: MappingReviewDetailRow[];
+}
+
 export interface ReportListItem {
   report_id: string;
   job_id: string;
@@ -138,6 +198,13 @@ export interface ReportListItem {
 
 export interface ReportsList {
   items: ReportListItem[];
+}
+
+export interface BackendActionResult {
+  ok: boolean;
+  message: string | null;
+  redirect_path: string | null;
+  redirect_query: Record<string, string>;
 }
 
 export interface UserRecord {

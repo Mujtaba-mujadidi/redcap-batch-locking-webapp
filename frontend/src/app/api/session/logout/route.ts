@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { backendOrigin, sessionCookieName } from "@/lib/env";
+import { buildAppUrl } from "@/lib/request-url";
 
 export async function POST(request: Request) {
   const headers = new Headers({
@@ -17,7 +18,7 @@ export async function POST(request: Request) {
     cache: "no-store",
   });
 
-  const response = NextResponse.redirect(new URL("/login", request.url), 303);
+  const response = NextResponse.redirect(buildAppUrl(request, "/login"), 303);
   const setCookie = backendResponse.headers.get("set-cookie");
   if (setCookie) {
     response.headers.set("set-cookie", setCookie);

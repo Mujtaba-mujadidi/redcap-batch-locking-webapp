@@ -1,6 +1,6 @@
 import { MetricCard } from "@/components/metric-card";
 import { PageHeader } from "@/components/page-header";
-import { buildLegacyUrl, fetchBackendJson } from "@/lib/backend";
+import { fetchBackendJson } from "@/lib/backend";
 import type { WorkspaceSummary } from "@/lib/types";
 
 export default async function OverviewPage() {
@@ -13,7 +13,7 @@ export default async function OverviewPage() {
         title="Operations Dashboard"
         description="Live overview of access, readiness, and the authenticated foundation for the batch locking platform."
         actions={
-          <a className="header-action" href={buildLegacyUrl("/app")}>
+          <a className="header-action" href="/app">
             Refresh
           </a>
         }

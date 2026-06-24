@@ -1,11 +1,28 @@
 import { NextResponse } from "next/server";
 
 import { backendOrigin } from "@/lib/env";
+import { buildAppUrl } from "@/lib/request-url";
+
+async function readCredentials(request: Request) {
+  const contentType = request.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    const body = (await request.json()) as { email?: string; password?: string };
+    return {
+      email: String(body.email || "").trim(),
+      password: String(body.password || ""),
+    };
+  }
+
+  const formData = await request.formData();
+  return {
+    email: String(formData.get("email") || "").trim(),
+    password: String(formData.get("password") || ""),
+  };
+}
 
 export async function POST(request: Request) {
-  const formData = await request.formData();
-  const email = String(formData.get("email") || "").trim();
-  const password = String(formData.get("password") || "");
+  const { email, password } = await readCredentials(request);
 
   const backendResponse = await fetch(new URL("/api/v1/auth/login", backendOrigin), {
     method: "POST",
@@ -27,12 +44,12 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.redirect(
-      new URL(`/login?error=${encodeURIComponent(errorMessage)}`, request.url),
+      buildAppUrl(request, `/login?error=${encodeURIComponent(errorMessage)}`),
       303,
     );
   }
 
-  const response = NextResponse.redirect(new URL("/app", request.url), 303);
+  const response = NextResponse.redirect(buildAppUrl(request, "/app"), 303);
   const setCookie = backendResponse.headers.get("set-cookie");
   if (setCookie) {
     response.headers.set("set-cookie", setCookie);

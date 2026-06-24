@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { backendOrigin, legacyAppUrl } from "@/lib/env";
+import { backendOrigin } from "@/lib/env";
 import type { SessionEnvelope } from "@/lib/types";
 
 export class BackendRequestError extends Error {
@@ -87,8 +87,4 @@ export async function requireSession(): Promise<SessionEnvelope> {
     redirect("/login");
   }
   return session;
-}
-
-export function buildLegacyUrl(path: string): string {
-  return joinUrl(legacyAppUrl, path);
 }

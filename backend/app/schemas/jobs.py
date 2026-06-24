@@ -39,6 +39,15 @@ class JobListItemRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
+    status_label: str
+    status_tone: str
+    action_kind: str | None
+    action_label: str | None
+    action_hint: str
+    cancel_label: str | None
+    continue_label: str | None
+    remap_label: str | None
+    launch_mode: str | None
 
 
 class JobsListRead(BaseModel):

@@ -2,19 +2,22 @@ import { formatStatus, statusTone } from "@/lib/format";
 import type { JobStatus } from "@/lib/types";
 
 type StatusPillProps = {
+  label?: string;
   status: JobStatus;
+  toneClassName?: string;
 };
 
-export function StatusPill({ status }: StatusPillProps) {
+export function StatusPill({ label, status, toneClassName }: StatusPillProps) {
   const toneClass =
-    statusTone(status) === "good"
+    toneClassName ||
+    (statusTone(status) === "good"
       ? "status-active"
       : statusTone(status) === "warn"
         ? "status-review"
-        : "status-inactive";
+        : "status-inactive");
   return (
     <span className={`status-pill ${toneClass}`}>
-      {formatStatus(status)}
+      {label || formatStatus(status)}
     </span>
   );
 }

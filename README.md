@@ -92,7 +92,6 @@ cd frontend
 npm install
 export BACKEND_ORIGIN=http://localhost:8000
 export NEXT_PUBLIC_BACKEND_ORIGIN=http://localhost:8000
-export NEXT_PUBLIC_LEGACY_APP_URL=http://localhost:8000
 npm run dev
 ```
 
