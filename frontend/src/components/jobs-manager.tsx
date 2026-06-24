@@ -1,14 +1,15 @@
 "use client";
 
 import type { FormEvent, ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { PageHeader } from "@/components/page-header";
 import { StatusPill } from "@/components/status-pill";
-import { formatDate, formatStatus } from "@/lib/format";
-import type { BackendActionResult, JobListItem } from "@/lib/types";
+import { TableActionMenu } from "@/components/table-action-menu";
+import { formatDate } from "@/lib/format";
+import type { BackendActionResult, JobListItem, JobsList } from "@/lib/types";
 
 type BannerState =
   | {
@@ -27,6 +28,10 @@ async function readActionResult(response: Response): Promise<BackendActionResult
   return (await response.json()) as BackendActionResult;
 }
 
+async function readJobsList(response: Response): Promise<JobsList> {
+  return (await response.json()) as JobsList;
+}
+
 function processModeLabel(mode: string | null): string {
   return mode === "live" ? "Live in this browser session" : "Background worker";
 }
@@ -42,6 +47,13 @@ function reviewLabel(reviewCount: number): string {
 
   return `${reviewCount} form${reviewCount === 1 ? "" : "s"} to review`;
 }
+
+const importProgressStages = [
+  "Validating files",
+  "Checking REDCap project details",
+  "Preparing field mappings",
+  "Finalising the import",
+];
 
 function ModalFrame({
   children,
@@ -77,29 +89,41 @@ export function JobsManager({
   const router = useRouter();
   const importFormRef = useRef<HTMLFormElement | null>(null);
   const [jobs, setJobs] = useState(initialJobs);
+  const [hasActiveJobsState, setHasActiveJobsState] = useState(hasActiveJobs);
   const [banner, setBanner] = useState<BannerState>(initialBanner);
   const [importOpen, setImportOpen] = useState(false);
   const [importApiUrl, setImportApiUrl] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [processJob, setProcessJob] = useState<JobListItem | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
+  const [importProgressStageIndex, setImportProgressStageIndex] = useState(0);
+  const [importProgressPercent, setImportProgressPercent] = useState(12);
   const visibleJobs = jobs.slice(0, 3);
+  const importBusy = busyKey === "import";
 
   useEffect(() => {
     setJobs(initialJobs);
   }, [initialJobs]);
 
   useEffect(() => {
+    setHasActiveJobsState(hasActiveJobs);
+  }, [hasActiveJobs]);
+
+  useEffect(() => {
     setBanner(initialBanner);
   }, [initialBanner]);
 
   useEffect(() => {
-    if (processJob === null) {
+    document.body.classList.toggle("modal-open", processJob !== null || importBusy);
+    return () => {
       document.body.classList.remove("modal-open");
+    };
+  }, [processJob, importBusy]);
+
+  useEffect(() => {
+    if (processJob === null) {
       return;
     }
-
-    document.body.classList.add("modal-open");
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -110,27 +134,119 @@ export function JobsManager({
 
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.body.classList.remove("modal-open");
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [processJob]);
 
+  useEffect(() => {
+    if (!importBusy) {
+      setImportProgressStageIndex(0);
+      setImportProgressPercent(12);
+      return;
+    }
+
+    let stageIndex = 0;
+    let progressValue = 12;
+
+    setImportProgressStageIndex(0);
+    setImportProgressPercent(12);
+
+    const stageTimer = window.setInterval(() => {
+      if (stageIndex < importProgressStages.length - 1) {
+        stageIndex += 1;
+      }
+      setImportProgressStageIndex(stageIndex);
+    }, 2400);
+
+    const fillTimer = window.setInterval(() => {
+      const cap = stageIndex >= importProgressStages.length - 1 ? 86 : 92;
+      progressValue = Math.min(progressValue + 5, cap);
+      setImportProgressPercent(progressValue);
+    }, 700);
+
+    return () => {
+      window.clearInterval(stageTimer);
+      window.clearInterval(fillTimer);
+    };
+  }, [importBusy]);
+
+  useEffect(() => {
+    if (!hasActiveJobsState) {
+      return;
+    }
+
+    let disposed = false;
+    let polling = false;
+
+    async function pollJobs() {
+      if (polling || disposed) {
+        return;
+      }
+
+      polling = true;
+      try {
+        const response = await fetch("/api/jobs?limit=3", {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+          },
+          cache: "no-store",
+        });
+ 
+        if (response.status === 404) {
+          return;
+        }
+ 
+        if (response.status === 401) {
+          router.push("/login");
+          return;
+        }
+ 
+        if (!response.ok) {
+          return;
+        }
+ 
+        const payload = await readJobsList(response);
+        if (disposed) {
+          return;
+        }
+ 
+        startTransition(() => {
+          setJobs(payload.items);
+          setHasActiveJobsState(payload.has_active_jobs);
+        });
+      } finally {
+        polling = false;
+      }
+    }
+ 
+    void pollJobs();
+    const timer = window.setInterval(() => {
+      void pollJobs();
+    }, 3000);
+ 
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [hasActiveJobsState, router]);
+ 
   function closeProcessModal() {
     setProcessJob(null);
     setProcessError(null);
   }
-
+ 
   async function refreshJobs() {
     router.refresh();
   }
-
+ 
   async function runAction(
     endpoint: string,
     body?: FormData,
     busyLabel?: string,
   ): Promise<BackendActionResult | null> {
     setBusyKey(busyLabel || endpoint);
-
+ 
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -232,9 +348,8 @@ export function JobsManager({
       <PageHeader
         eyebrow="Job Queue"
         title="Jobs"
-        description="Track the three most recent requests, re-run imports, and move into mapping or processing from one organised workspace."
         actions={
-          <>
+          <div className="jobs-header-actions">
             <a className="header-action" href="/api/jobs/template">
               Export Template
             </a>
@@ -246,7 +361,7 @@ export function JobsManager({
             >
               {importOpen ? "Cancel" : "Import File"}
             </button>
-          </>
+          </div>
         }
       />
 
@@ -345,7 +460,7 @@ export function JobsManager({
           </div>
         </div>
 
-        {hasActiveJobs ? (
+        {hasActiveJobsState ? (
           <div className="banner banner-success queue-banner">
             At least one request is active right now. Use the refresh button in your browser or revisit this page to watch the queue update.
           </div>
@@ -445,6 +560,8 @@ export function JobsManager({
                           <div className="job-result-stats">
                             <span className="job-result-stat">{job.locked_rows} locked</span>
                             <span className="job-result-stat">{job.unlocked_rows} unlocked</span>
+                            <span className="job-result-stat">{job.ignored_rows} skipped</span>
+                            <span className="job-result-stat">{job.blocked_rows} blocked</span>
                             <span className="job-result-stat">{job.failed_rows} failed</span>
                           </div>
                           <p className="compact-copy">{reviewLabel(job.review_count)}</p>
@@ -454,13 +571,11 @@ export function JobsManager({
                       <td className="actions-column job-actions-cell">
                         <div className="table-actions">
                           {job.action_kind || job.cancel_label || job.continue_label || job.remap_label || job.report_id ? (
-                            <details className="job-action-menu">
-                              <summary className="manage-button">Action</summary>
-                              <div className="job-action-menu-list">
+                            <TableActionMenu ariaLabel={`Open actions for ${job.request_file_name || "this job"}`}>
                                 {job.action_kind === "process" || job.action_kind === "process_cached" ? (
                                   <button
                                     type="button"
-                                    className="job-action-menu-button"
+                                    className="table-action-menu-button"
                                     onClick={() => {
                                       setProcessError(null);
                                       setProcessJob(job);
@@ -471,13 +586,13 @@ export function JobsManager({
                                 ) : null}
 
                                 {job.action_kind === "link" ? (
-                                  <Link className="job-action-menu-link" href={`/mappings?job_id=${job.id}`}>
+                                  <Link className="table-action-menu-link" href={`/mappings?job_id=${job.id}`}>
                                     {job.action_label || "Review mappings"}
                                   </Link>
                                 ) : null}
 
                                 {job.action_kind === "download" && job.report_id ? (
-                                  <a className="job-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
+                                  <a className="table-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
                                     {job.action_label || "Export Report"}
                                   </a>
                                 ) : null}
@@ -485,7 +600,7 @@ export function JobsManager({
                                 {job.remap_label ? (
                                   <button
                                     type="button"
-                                    className="job-action-menu-button"
+                                    className="table-action-menu-button"
                                     onClick={() => {
                                       const formData = new FormData();
                                       formData.set("return_to", "jobs");
@@ -504,7 +619,7 @@ export function JobsManager({
                                 {job.continue_label ? (
                                   <button
                                     type="button"
-                                    className="job-action-menu-button"
+                                    className="table-action-menu-button"
                                     onClick={() => {
                                       void handleSimpleAction(
                                         `/api/jobs/${job.id}/use-existing-mappings`,
@@ -520,7 +635,7 @@ export function JobsManager({
                                 {job.cancel_label ? (
                                   <button
                                     type="button"
-                                    className="job-action-menu-button"
+                                    className="table-action-menu-button"
                                     onClick={() => {
                                       void handleSimpleAction(
                                         `/api/jobs/${job.id}/cancel`,
@@ -534,19 +649,15 @@ export function JobsManager({
                                 ) : null}
 
                                 {job.report_id && job.action_kind !== "download" ? (
-                                  <a className="job-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
+                                  <a className="table-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
                                     Export Report
                                   </a>
                                 ) : null}
-                              </div>
-                            </details>
+                            </TableActionMenu>
                           ) : (
                             <span className="compact-copy">No actions</span>
                           )}
 
-                          {job.status !== "completed" && job.status !== "cancelled" ? (
-                            <span className="table-note">{formatStatus(job.job_type)}</span>
-                          ) : null}
                         </div>
                       </td>
                     </tr>
@@ -607,6 +718,33 @@ export function JobsManager({
           </form>
         ) : null}
       </ModalFrame>
+
+      <div className="progress-overlay" hidden={!importBusy}>
+        <div className="progress-dialog" role="status" aria-live="polite" aria-atomic="true">
+          <div className="import-progress-heading">
+            <span className="loader-spinner" aria-hidden="true"></span>
+            <div>
+              <p className="mini-label">Live Processing</p>
+              <h4 className="progress-title">Running REDCap pre-flight</h4>
+            </div>
+          </div>
+          <p className="compact-copy">
+            Validating the import package, checking the REDCap project, and preparing any mapping review that is needed.
+          </p>
+          <div className="progress-meter" aria-hidden="true">
+            <div
+              className="progress-meter-fill"
+              style={{ width: `${importProgressPercent}%` }}
+            ></div>
+          </div>
+          <p className="progress-stage-copy">
+            {importProgressStages[importProgressStageIndex] || "Preparing the next step..."}
+          </p>
+          <p className="compact-copy progress-mode-copy">
+            Mode: Live in this browser session. Keep this tab open while the request is prepared.
+          </p>
+        </div>
+      </div>
     </>
   );
 }

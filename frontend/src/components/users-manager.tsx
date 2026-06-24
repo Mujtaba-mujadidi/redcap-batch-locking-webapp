@@ -5,6 +5,7 @@ import { useDeferredValue, useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import { PageHeader } from "@/components/page-header";
+import { TableActionMenu } from "@/components/table-action-menu";
 import { formatDate } from "@/lib/format";
 import type { AuthUser, Role, UserRecord } from "@/lib/types";
 
@@ -566,13 +567,16 @@ export function UsersManager({
                           </td>
                           <td>{user.last_login_at ? formatDate(user.last_login_at) : "Never"}</td>
                           <td className="actions-column">
-                            <button
-                              type="button"
-                              className={`manage-button${isManageable ? "" : " manage-button-secondary"}`}
-                              onClick={() => openManageModal(user)}
-                            >
-                              Manage
-                            </button>
+                            <TableActionMenu ariaLabel={`Open actions for ${user.full_name || user.email}`}>
+                              <button
+                                type="button"
+                                className="table-action-menu-button"
+                                onClick={() => openManageModal(user)}
+                                disabled={!isManageable}
+                              >
+                                Manage
+                              </button>
+                            </TableActionMenu>
                           </td>
                         </tr>
                       );

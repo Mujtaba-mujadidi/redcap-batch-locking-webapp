@@ -44,6 +44,32 @@ export async function proxyBackendJsonRequest(
   return response;
 }
 
+export async function proxyBackendGetRequest(
+  request: Request,
+  path: string,
+): Promise<NextResponse> {
+  const backendResponse = await fetch(new URL(path, backendOrigin), {
+    method: "GET",
+    headers: buildCookieHeaders(request, "application/json"),
+    cache: "no-store",
+  });
+
+  const response = new NextResponse(await backendResponse.text(), {
+    status: backendResponse.status,
+  });
+  const responseContentType = backendResponse.headers.get("content-type");
+  if (responseContentType) {
+    response.headers.set("content-type", responseContentType);
+  }
+
+  const setCookie = backendResponse.headers.get("set-cookie");
+  if (setCookie) {
+    response.headers.set("set-cookie", setCookie);
+  }
+
+  return response;
+}
+
 function buildCookieHeaders(request: Request, accept: string): Headers {
   const headers = new Headers({
     accept,

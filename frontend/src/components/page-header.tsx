@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 type PageHeaderProps = {
   eyebrow: string;
   title: string;
-  description: string;
+  description?: string;
   actions?: ReactNode;
 };
 
@@ -18,7 +18,7 @@ export function PageHeader({
       <div>
         <p className="mini-label">{eyebrow}</p>
         <h1 className="section-title">{title}</h1>
-        <p className="section-subtitle">{description}</p>
+        {description ? <p className="section-subtitle">{description}</p> : null}
       </div>
       {actions ? <div className="toolbar-actions">{actions}</div> : null}
     </section>

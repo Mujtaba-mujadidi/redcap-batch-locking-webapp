@@ -196,7 +196,7 @@ code,
   background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
   box-shadow: var(--shadow-soft);
-  animation: fade-up 420ms ease both;
+  animation: fade-in 420ms ease both;
   position: sticky;
   top: 0;
   align-self: start;
@@ -403,7 +403,7 @@ code,
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  animation: fade-up 520ms ease both;
+  animation: fade-in 520ms ease both;
   padding: 1.25rem 1.5rem 1.75rem;
   min-width: 0;
 }
@@ -487,6 +487,13 @@ code,
   min-width: 9.5rem;
   height: 2.75rem;
   padding: 0 1.05rem;
+}
+
+.jobs-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: nowrap;
 }
 
 .page-header {
@@ -912,6 +919,12 @@ code,
 
 .actions-column {
   width: 9rem;
+  text-align: center;
+}
+
+.actions-column .table-action-menu {
+  display: flex;
+  justify-content: center;
 }
 
 .manage-button {
@@ -927,8 +940,38 @@ code,
   color: #ffffff;
   font-size: 0.82rem;
   font-weight: 700;
+  text-decoration: none;
   cursor: pointer;
   box-shadow: 0 10px 18px rgba(99, 210, 199, 0.2);
+}
+
+.table-action-trigger {
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.18rem 0.12rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+.table-action-trigger-dots {
+  display: inline-grid;
+  justify-content: center;
+  gap: 0.14rem;
+}
+
+.table-action-trigger-dots span {
+  width: 0.28rem;
+  height: 0.28rem;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.table-action-trigger:hover {
+  color: #38b2a6;
 }
 
 .manage-button-secondary {
@@ -996,7 +1039,8 @@ code,
 .table-actions {
   display: grid;
   gap: 0.55rem;
-  justify-items: start;
+  width: 100%;
+  justify-items: center;
 }
 
 .queue-banner {
@@ -1120,6 +1164,46 @@ code,
   color: #406ea7;
 }
 
+.import-progress-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(8px);
+}
+
+.progress-dialog {
+  width: min(100%, 32rem);
+  padding: 1.4rem 1.35rem;
+  border: 1px solid rgba(214, 225, 236, 0.9);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at top right, rgba(99, 210, 199, 0.12), transparent 42%),
+    linear-gradient(180deg, #ffffff, #f8fbff);
+  box-shadow: 0 30px 80px rgba(30, 41, 59, 0.28);
+}
+
+.progress-dialog .progress-meter {
+  width: 100%;
+  height: 0.95rem;
+  margin-top: 1rem;
+  border: 1px solid rgba(209, 220, 231, 0.95);
+}
+
+.progress-dialog .progress-meter-fill {
+  box-shadow: 0 10px 18px rgba(88, 189, 180, 0.2);
+  transition: width 700ms ease;
+}
+
 .job-updated-cell {
   min-width: 8.4rem;
   color: #5f6c7f;
@@ -1142,23 +1226,31 @@ code,
   border-width: 1.8px;
 }
 
-.job-action-menu {
+.progress-title {
+  margin: 0.12rem 0 0;
+  color: var(--heading);
+  font-size: 1.18rem;
+}
+
+.progress-stage-copy {
+  margin: 0.9rem 0 0;
+  color: var(--heading);
+  font-size: 0.96rem;
+  font-weight: 700;
+}
+
+.progress-mode-copy {
+  margin-top: 0.42rem;
+}
+
+.table-action-menu {
   position: relative;
-  width: 100%;
+  display: inline-block;
 }
 
-.job-action-menu summary {
-  list-style: none;
-  width: 100%;
-}
-
-.job-action-menu summary::-webkit-details-marker {
-  display: none;
-}
-
-.job-action-menu-list {
+.table-action-menu-list {
   position: absolute;
-  top: calc(100% + 0.45rem);
+  top: calc(100% + 0.3rem);
   right: 0;
   z-index: 20;
   display: grid;
@@ -1171,12 +1263,12 @@ code,
   box-shadow: var(--shadow);
 }
 
-.job-action-menu-form {
+.table-action-menu-form {
   margin: 0;
 }
 
-.job-action-menu-button,
-.job-action-menu-link {
+.table-action-menu-button,
+.table-action-menu-link {
   display: flex;
   align-items: center;
   width: 100%;
@@ -1192,12 +1284,17 @@ code,
   cursor: pointer;
 }
 
-.job-action-menu-link {
+.table-action-menu-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.table-action-menu-link {
   text-decoration: none;
 }
 
-.job-action-menu-button:hover,
-.job-action-menu-link:hover {
+.table-action-menu-button:hover:not(:disabled),
+.table-action-menu-link:hover {
   background: #f6f9fc;
 }
 
@@ -1207,6 +1304,11 @@ code,
 
 .jobs-review-table .manage-button {
   width: 100%;
+  min-width: 0;
+}
+
+.jobs-review-table .table-action-trigger {
+  width: auto;
   min-width: 0;
 }
 
@@ -1405,15 +1507,13 @@ body.sidebar-collapsed .sidebar-button-label {
   display: none;
 }
 
-@keyframes fade-up {
+@keyframes fade-in {
   from {
     opacity: 0;
-    transform: translateY(12px);
   }
 
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -1569,7 +1669,7 @@ body.sidebar-collapsed .sidebar-button-label {
     flex: 1;
   }
 
-  .job-action-menu-list {
+  .table-action-menu-list {
     position: static;
     min-width: 0;
     width: 100%;

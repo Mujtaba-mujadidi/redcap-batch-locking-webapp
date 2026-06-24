@@ -21,14 +21,6 @@ const navItems = [
   { href: "/users", label: "Users" },
 ];
 
-const pageLabels: Record<string, string> = {
-  "/app": "Dashboard",
-  "/jobs": "Jobs",
-  "/mappings": "Mappings",
-  "/reports": "Reports",
-  "/users": "Users",
-};
-
 function NavIcon({ label }: { label: string }) {
   switch (label) {
     case "Dashboard":
@@ -220,20 +212,7 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
       </aside>
 
       <main className="dashboard-main workspace-main">
-        <div className="content-column">
-          <header className="topbar">
-            <div>
-              <div className="topbar-title-row">
-                <span className="topbar-brand-icon">
-                  <BrandMark />
-                </span>
-                <h1 className="topbar-title">REDCap Batch Locking</h1>
-              </div>
-              <p className="topbar-subtitle">{pageLabels[pathname] || "Workspace"}</p>
-            </div>
-          </header>
-          {children}
-        </div>
+        <div className="content-column">{children}</div>
       </main>
     </div>
   );
