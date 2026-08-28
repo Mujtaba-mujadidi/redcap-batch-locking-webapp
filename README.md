@@ -24,7 +24,8 @@ The repository now includes:
 - Project-scoped REDCap API rate limiting with visible wait/resume messaging
 - CSV report generation and export for completed, partial-error, and failed jobs
 - Session-scoped encrypted REDCap API key cache so repeat processing in the same session does not always prompt again
-- Docker Compose for Next.js frontend + API + PostgreSQL + Redis + Celery worker-backed background processing
+- Automated retention cleanup for expired cache/session rows and old terminal jobs
+- Docker Compose for Next.js frontend + API + PostgreSQL + Redis + Celery worker/beat-backed background processing
 
 ## Implemented snapshot
 
@@ -73,6 +74,14 @@ Run the Celery worker in a second terminal when working outside Docker:
 cd backend
 source .venv/bin/activate
 celery -A app.workers.celery_app.celery_app worker --loglevel=info --queues=redcap_jobs
+```
+
+Run the retention scheduler in a third terminal when working outside Docker:
+
+```bash
+cd backend
+source .venv/bin/activate
+celery -A app.workers.celery_app.celery_app beat --loglevel=info
 ```
 
 Use the same `REDCAP_API_KEY_CACHE_SECRET` value for both the API process and the worker. The worker does not receive the raw REDCap API key on the queue; it reloads the encrypted session-scoped cache instead.
@@ -156,6 +165,14 @@ After code changes:
 docker compose up --build
 ```
 
+To inspect retention cleanup manually:
+
+```bash
+cd backend
+python -m app.cli.cleanup --dry-run
+python -m app.cli.cleanup
+```
+
 ## Database migrations
 
 Alembic is the source of truth for database tables and schema changes.
@@ -180,3 +197,10 @@ For production, the normal setup flow will be:
 This means yes: there is now a repeatable migration command for setting up backend tables, and Alembic will handle future schema upgrades safely.
 
 For multi-process or Docker deployments, also set a shared `REDCAP_API_KEY_CACHE_SECRET` for both the API and worker services so background jobs can safely decrypt the short-lived cached REDCap API key.
+
+Retention defaults:
+
+- `TERMINAL_JOB_RETENTION_DAYS=30`
+- `MAINTENANCE_CLEANUP_INTERVAL_HOURS=24`
+
+Terminal jobs older than the retention window are deleted together with their job rows, row results, per-row job events, and report metadata. Expired session-scoped REDCap API key cache entries and expired/revoked sessions are also purged automatically.

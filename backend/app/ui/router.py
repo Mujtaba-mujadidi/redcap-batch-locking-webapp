@@ -1169,6 +1169,13 @@ def _resolve_processing_mode(*, row_count: int) -> str:
     return "background"
 
 
+def _resolve_retry_processing_mode(*, job: Job, row_count: int) -> str:
+    runtime_mode = str(_get_job_runtime_state(job).get("mode") or "").strip()
+    if runtime_mode in {"live", "background"}:
+        return runtime_mode
+    return _resolve_processing_mode(row_count=row_count)
+
+
 def _has_shared_redcap_api_key_cache_secret() -> bool:
     return bool((settings.redcap_api_key_cache_secret or "").strip())
 
@@ -1855,11 +1862,33 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             action_hint = progress["message"] or "Cancellation requested. Waiting for the current step to finish."
             status_tone = "status-review"
         elif job.status == JobStatus.CANCELLED:
-            if report is not None:
+            retry_rows = _get_retryable_rows(db, job_id=job.id)
+            retry_summary = _summarize_retry_candidates(retry_rows)
+            retry_launch_mode = _resolve_retry_processing_mode(job=job, row_count=int(retry_summary["count"]))
+            launch_mode = retry_launch_mode if retry_summary["count"] else None
+            if retry_summary["count"] and has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
+                action_label = "Re-process"
+                action_kind = "process_cached"
+                action_hint = (
+                    f"{job.last_error_summary or 'Processing was cancelled.'} "
+                    f"Re-process will continue with {retry_summary['selection_copy']} "
+                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} using the saved API key."
+                )
+            elif retry_summary["count"]:
+                action_label = "Re-process"
+                action_kind = "process"
+                action_hint = (
+                    f"{job.last_error_summary or 'Processing was cancelled.'} "
+                    f"Re-process will continue with {retry_summary['selection_copy']} "
+                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} once you enter the API key."
+                )
+            elif report is not None:
                 action_href = f"/reports/{report.id}/download"
                 action_label = "Export Report"
                 action_kind = "download"
-            action_hint = job.last_error_summary or "Cancelled before processing started."
+                action_hint = _build_job_outcome_copy(job)
+            else:
+                action_hint = job.last_error_summary or "Cancelled before processing started."
             status_tone = "status-inactive"
         elif job.status == JobStatus.COMPLETED:
             action_href = f"/reports/{report.id}/download" if report is not None else None
@@ -1870,7 +1899,7 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
         elif job.status in {JobStatus.COMPLETED_WITH_ERRORS, JobStatus.FAILED}:
             retry_rows = _get_retryable_rows(db, job_id=job.id)
             retry_summary = _summarize_retry_candidates(retry_rows)
-            retry_launch_mode = _resolve_processing_mode(row_count=int(retry_summary["count"]))
+            retry_launch_mode = _resolve_retry_processing_mode(job=job, row_count=int(retry_summary["count"]))
             launch_mode = retry_launch_mode if retry_summary["count"] else None
             if retry_summary["count"] and has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
                 action_label = str(retry_summary["action_label"])
@@ -2718,7 +2747,7 @@ def run_job_processing(
         job = db.get(Job, job_id)
         if job is None:
             return
-        if job.status == JobStatus.CANCELLED:
+        if job.status == JobStatus.CANCELLED and not retry_row_ids:
             return
 
         def cancel_if_requested(cancellation_message: str) -> bool:
@@ -2820,6 +2849,7 @@ def run_job_processing(
                 db.commit()
 
         previous_status = job.status
+        job.cancellation_requested_at = None
         job.processed_rows = 0
         job.locked_rows = 0
         job.unlocked_rows = 0
@@ -3222,7 +3252,7 @@ def run_job_processing(
                     row_result.status = RowResultStatus.FAILED
                     row_result.outcome_code = "processing_error"
                     row_result.message = str(exc)
-                    row_result.details_json = None
+                    row_result.details_json = {"error": str(exc)}
                     row_result.redcap_http_status = None
                     job.failed_rows += 1
                     if not job.last_error_summary:
@@ -3414,7 +3444,7 @@ def process_job_from_ui(
     if job is None or not _can_access_job(session.user, job):
         return RedirectResponse("/jobs", status_code=303)
 
-    if job.status not in {JobStatus.READY, JobStatus.FAILED, JobStatus.COMPLETED_WITH_ERRORS}:
+    if job.status not in {JobStatus.READY, JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.COMPLETED_WITH_ERRORS}:
         return _build_jobs_redirect(error="Only ready or retryable jobs can be processed.", process_job_id=job.id)
 
     cleaned_api_key = ""
@@ -3455,7 +3485,7 @@ def process_job_from_ui(
         "selection_copy": _format_row_count(job.total_rows or 0),
         "progress_summary": "rows",
     }
-    is_retry_attempt = job.status in {JobStatus.FAILED, JobStatus.COMPLETED_WITH_ERRORS}
+    is_retry_attempt = job.status in {JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.COMPLETED_WITH_ERRORS}
     if is_retry_attempt:
         retry_rows = _get_retryable_rows(db, job_id=job.id)
         retry_row_ids = [row.id for row in retry_rows]
@@ -3463,7 +3493,11 @@ def process_job_from_ui(
         if not retry_row_ids:
             return _build_jobs_redirect(error="This job has no failed or unprocessed rows left to retry.")
     active_row_count = len(retry_row_ids) if retry_row_ids else int(job.total_rows or 0)
-    launch_mode = _resolve_processing_mode(row_count=active_row_count)
+    launch_mode = (
+        _resolve_retry_processing_mode(job=job, row_count=active_row_count)
+        if is_retry_attempt
+        else _resolve_processing_mode(row_count=active_row_count)
+    )
     if launch_mode == "background" and not _has_shared_redcap_api_key_cache_secret():
         return _build_jobs_redirect(
             error=(
@@ -3503,6 +3537,11 @@ def process_job_from_ui(
         db.expire_all()
         refreshed_job = db.get(Job, job.id)
         job_label = (refreshed_job.request_file_name if refreshed_job is not None else None) or (job.request_file_name or "job")
+        if refreshed_job is not None and refreshed_job.status == JobStatus.CANCELLED:
+            return _build_jobs_redirect(
+                error=f"Live processing for {job_label} was cancelled before it could finish. Try again from the Jobs page.",
+                process_job_id=job.id,
+            )
         if refreshed_job is not None and refreshed_job.status == JobStatus.FAILED:
             return _build_jobs_redirect(
                 error=f"Live processing failed for {job_label}. Review the Jobs page for details.",
@@ -3514,7 +3553,10 @@ def process_job_from_ui(
             else f"Finished live processing for {job_label}. "
         )
         if refreshed_job is not None and refreshed_job.status == JobStatus.COMPLETED_WITH_ERRORS:
-            live_message += "Some rows were blocked or failed. Review the Jobs page for details."
+            live_message += "Some rows were blocked or failed."
+            if refreshed_job.last_error_summary:
+                live_message += f" {refreshed_job.last_error_summary}"
+            live_message += " Review the Jobs page for details."
         else:
             live_message += "Results are now available on the Jobs page."
         return _build_jobs_redirect(success=live_message)
@@ -3522,6 +3564,7 @@ def process_job_from_ui(
     previous_status = job.status
     previous_started_at = job.started_at
     previous_completed_at = job.completed_at
+    previous_cancellation_requested_at = job.cancellation_requested_at
     previous_last_error_summary = job.last_error_summary
     previous_processed_rows = job.processed_rows
     previous_locked_rows = job.locked_rows
@@ -3532,6 +3575,7 @@ def process_job_from_ui(
     previous_options_json = job.options_json
     queued_task_id = str(uuid4())
     job.status = JobStatus.QUEUED
+    job.cancellation_requested_at = None
     job.started_at = None
     job.completed_at = None
     job.processed_rows = 0
@@ -3585,6 +3629,7 @@ def process_job_from_ui(
         if queued_job is not None:
             dispatch_failed_from = queued_job.status
             queued_job.status = previous_status
+            queued_job.cancellation_requested_at = previous_cancellation_requested_at
             queued_job.started_at = previous_started_at
             queued_job.completed_at = previous_completed_at
             queued_job.last_error_summary = previous_last_error_summary

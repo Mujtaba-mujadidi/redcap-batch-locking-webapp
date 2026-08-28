@@ -9,7 +9,7 @@ import { PageHeader } from "@/components/page-header";
 import { StatusPill } from "@/components/status-pill";
 import { TableActionMenu } from "@/components/table-action-menu";
 import { formatDate } from "@/lib/format";
-import type { BackendActionResult, JobListItem, JobsList } from "@/lib/types";
+import type { BackendActionResult, JobListItem, JobsList, JobStatus } from "@/lib/types";
 
 type BannerState =
   | {
@@ -36,8 +36,25 @@ function processModeLabel(mode: string | null): string {
   return mode === "live" ? "Live in this browser session" : "Background worker";
 }
 
+function progressModeLabel(mode: string | null): string {
+  return mode === "live" ? "Live processing" : "Background processing";
+}
+
 function isTerminalJob(status: string): boolean {
   return ["completed", "cancelled", "failed"].includes(status);
+}
+
+function shouldShowProgressMode(status: JobStatus): boolean {
+  return [
+    "queued",
+    "running",
+    "waiting_due_to_rate_limit",
+    "cancel_requested",
+    "cancelled",
+    "completed",
+    "completed_with_errors",
+    "failed",
+  ].includes(status);
 }
 
 function reviewLabel(reviewCount: number): string {
@@ -53,6 +70,13 @@ const importProgressStages = [
   "Checking REDCap project details",
   "Preparing field mappings",
   "Finalising the import",
+];
+
+const processProgressStages = [
+  "Checking REDCap access",
+  "Loading project details",
+  "Processing request rows",
+  "Finalising results",
 ];
 
 function ModalFrame({
@@ -100,6 +124,15 @@ export function JobsManager({
   const [importProgressPercent, setImportProgressPercent] = useState(12);
   const visibleJobs = jobs.slice(0, 3);
   const importBusy = busyKey === "import";
+  const processBusy = Boolean(busyKey?.startsWith("process-"));
+  const overlayBusy = importBusy || processBusy;
+  const processBusyJob = processBusy
+    ? jobs.find((job) => `process-${job.id}` === busyKey) || processJob
+    : null;
+  const overlayStages = importBusy ? importProgressStages : processProgressStages;
+  const overlayIsRetry = Boolean(
+    processBusyJob?.action_label && /retry/i.test(processBusyJob.action_label),
+  );
 
   useEffect(() => {
     setJobs(initialJobs);
@@ -114,11 +147,11 @@ export function JobsManager({
   }, [initialBanner]);
 
   useEffect(() => {
-    document.body.classList.toggle("modal-open", processJob !== null || importBusy);
+    document.body.classList.toggle("modal-open", processJob !== null || overlayBusy);
     return () => {
       document.body.classList.remove("modal-open");
     };
-  }, [processJob, importBusy]);
+  }, [processJob, overlayBusy]);
 
   useEffect(() => {
     if (processJob === null) {
@@ -139,7 +172,7 @@ export function JobsManager({
   }, [processJob]);
 
   useEffect(() => {
-    if (!importBusy) {
+    if (!overlayBusy) {
       setImportProgressStageIndex(0);
       setImportProgressPercent(12);
       return;
@@ -152,14 +185,14 @@ export function JobsManager({
     setImportProgressPercent(12);
 
     const stageTimer = window.setInterval(() => {
-      if (stageIndex < importProgressStages.length - 1) {
+      if (stageIndex < overlayStages.length - 1) {
         stageIndex += 1;
       }
       setImportProgressStageIndex(stageIndex);
     }, 2400);
 
     const fillTimer = window.setInterval(() => {
-      const cap = stageIndex >= importProgressStages.length - 1 ? 86 : 92;
+      const cap = stageIndex >= overlayStages.length - 1 ? 86 : 92;
       progressValue = Math.min(progressValue + 5, cap);
       setImportProgressPercent(progressValue);
     }, 700);
@@ -168,7 +201,7 @@ export function JobsManager({
       window.clearInterval(stageTimer);
       window.clearInterval(fillTimer);
     };
-  }, [importBusy]);
+  }, [overlayBusy, overlayStages.length]);
 
   useEffect(() => {
     if (!hasActiveJobsState) {
@@ -252,7 +285,17 @@ export function JobsManager({
         method: "POST",
         body: body || new FormData(),
       });
-      const result = await readActionResult(response);
+      let result: BackendActionResult;
+      try {
+        result = await readActionResult(response);
+      } catch {
+        return {
+          ok: false,
+          message: `Request failed with status ${response.status}.`,
+          redirect_path: null,
+          redirect_query: {},
+        };
+      }
       if (response.status === 401) {
         router.push("/login");
         return null;
@@ -339,6 +382,37 @@ export function JobsManager({
     setBanner({
       tone: result.ok ? "success" : "error",
       message: result.message || successFallback,
+    });
+    await refreshJobs();
+  }
+
+  async function handleProcessWithCachedKey(job: JobListItem) {
+    setBanner(null);
+    setProcessError(null);
+
+    const result = await runAction(
+      `/api/jobs/${job.id}/process`,
+      new FormData(),
+      `process-${job.id}`,
+    );
+    if (!result) {
+      return;
+    }
+
+    if (
+      !result.ok &&
+      result.redirect_query.open_modal &&
+      result.redirect_query.process_job_id === job.id
+    ) {
+      setProcessJob(job);
+      setProcessError(result.message || "Enter the REDCap API key to process this job.");
+      return;
+    }
+
+    const remainingFailures = /failed|blocked/i.test(result.message || "");
+    setBanner({
+      tone: result.ok && !remainingFailures ? "success" : "error",
+      message: result.message || (job.action_label === "Re-process" ? "Job restarted." : "Job processing started."),
     });
     await refreshJobs();
   }
@@ -511,7 +585,6 @@ export function JobsManager({
                       </td>
                       <td className="job-status-cell">
                         <StatusPill status={job.status} label={job.status_label} toneClassName={job.status_tone} />
-                        {job.action_hint ? <p className="compact-copy">{job.action_hint}</p> : null}
                       </td>
                       <td>
                         {showProgressPanel ? (
@@ -548,7 +621,9 @@ export function JobsManager({
                             {job.progress.wait_message ? (
                               <p className="compact-copy job-progress-wait">{job.progress.wait_message}</p>
                             ) : null}
-                            {job.progress.detail ? <p className="compact-copy">{job.progress.detail}</p> : null}
+                            {shouldShowProgressMode(job.status) ? (
+                              <p className="job-progress-mode">{progressModeLabel(job.progress.mode)}</p>
+                            ) : null}
                           </div>
                         ) : (
                           <p className="compact-copy">No live progress to show.</p>
@@ -572,7 +647,19 @@ export function JobsManager({
                         <div className="table-actions">
                           {job.action_kind || job.cancel_label || job.continue_label || job.remap_label || job.report_id ? (
                             <TableActionMenu ariaLabel={`Open actions for ${job.request_file_name || "this job"}`}>
-                                {job.action_kind === "process" || job.action_kind === "process_cached" ? (
+                                {job.action_kind === "process_cached" ? (
+                                  <button
+                                    type="button"
+                                    className="table-action-menu-button"
+                                    onClick={() => {
+                                      void handleProcessWithCachedKey(job);
+                                    }}
+                                  >
+                                    {job.action_label || "Process"}
+                                  </button>
+                                ) : null}
+
+                                {job.action_kind === "process" ? (
                                   <button
                                     type="button"
                                     className="table-action-menu-button"
@@ -697,8 +784,8 @@ export function JobsManager({
             </label>
             <p className="field-hint">
               {processJob.action_kind === "process_cached"
-                ? "Leave this blank to reuse the saved session key for this REDCap host, or enter a new key to replace it."
-                : "Enter the REDCap API key to begin processing. The key will be cached only for this session."}
+                ? "If a saved session key is still available for this REDCap host you can leave this blank, otherwise enter a fresh key to continue."
+                : "Enter the REDCap API key to begin processing. The key will be cached for this session and reused straight after pre-flight."}
             </p>
 
             {processError ? <p className="error-message">{processError}</p> : null}
@@ -719,17 +806,27 @@ export function JobsManager({
         ) : null}
       </ModalFrame>
 
-      <div className="progress-overlay" hidden={!importBusy}>
+      <div className="progress-overlay" hidden={!overlayBusy}>
         <div className="progress-dialog" role="status" aria-live="polite" aria-atomic="true">
           <div className="import-progress-heading">
             <span className="loader-spinner" aria-hidden="true"></span>
             <div>
               <p className="mini-label">Live Processing</p>
-              <h4 className="progress-title">Running REDCap pre-flight</h4>
+              <h4 className="progress-title">
+                {importBusy
+                  ? "Running REDCap pre-flight"
+                  : overlayIsRetry
+                    ? "Retrying failed rows"
+                    : "Starting request processing"}
+              </h4>
             </div>
           </div>
           <p className="compact-copy">
-            Validating the import package, checking the REDCap project, and preparing any mapping review that is needed.
+            {importBusy
+              ? "Validating the import package, checking the REDCap project, and preparing any mapping review that is needed."
+              : overlayIsRetry
+                ? "Checking REDCap access and reprocessing only the rows that failed."
+                : "Checking REDCap access, loading project details, and processing request rows."}
           </p>
           <div className="progress-meter" aria-hidden="true">
             <div
@@ -738,7 +835,7 @@ export function JobsManager({
             ></div>
           </div>
           <p className="progress-stage-copy">
-            {importProgressStages[importProgressStageIndex] || "Preparing the next step..."}
+            {overlayStages[importProgressStageIndex] || "Preparing the next step..."}
           </p>
           <p className="compact-copy progress-mode-copy">
             Mode: Live in this browser session. Keep this tab open while the request is prepared.

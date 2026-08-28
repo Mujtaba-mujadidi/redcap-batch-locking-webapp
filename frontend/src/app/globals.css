@@ -19,6 +19,8 @@
   --radius-xl: 18px;
   --radius-lg: 14px;
   --radius-md: 10px;
+  --workspace-gutter: 1rem;
+  --workspace-gutter-mobile: 0.85rem;
 }
 
 * {
@@ -404,17 +406,17 @@ code,
   flex-direction: column;
   gap: 0.75rem;
   animation: fade-in 520ms ease both;
-  padding: 1.25rem 1.5rem 1.75rem;
+  padding: 1.25rem var(--workspace-gutter) 1.75rem;
   min-width: 0;
 }
 
 .content-column {
   width: 100%;
-  max-width: 1120px;
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   min-width: 0;
 }
 
@@ -919,10 +921,14 @@ code,
 
 .actions-column {
   width: 9rem;
+}
+
+.data-table th.actions-column,
+.data-table td.actions-column {
   text-align: center;
 }
 
-.actions-column .table-action-menu {
+.data-table td.actions-column .table-action-menu {
   display: flex;
   justify-content: center;
 }
@@ -1128,7 +1134,7 @@ code,
 }
 
 .job-status-cell {
-  min-width: 10rem;
+  min-width: 7.25rem;
 }
 
 .job-status-cell .compact-copy,
@@ -1158,6 +1164,13 @@ code,
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+}
+
+.job-progress-mode {
+  margin: 0;
+  color: #2d736d;
+  font-size: 0.77rem;
+  font-weight: 700;
 }
 
 .job-progress-wait {
@@ -1599,7 +1612,7 @@ body.sidebar-collapsed .sidebar-button-label {
   }
 
   .dashboard-main {
-    padding: 4.75rem 1rem 1.4rem;
+    padding: 4.75rem var(--workspace-gutter) 1.4rem;
   }
 
   .datatable-footer {
@@ -1620,7 +1633,7 @@ body.sidebar-collapsed .sidebar-button-label {
 
 @media (max-width: 760px) {
   .dashboard-main {
-    padding: 4.5rem 0.85rem 1.15rem;
+    padding: 4.5rem var(--workspace-gutter-mobile) 1.15rem;
   }
 
   .workspace-hero,

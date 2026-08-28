@@ -1,7 +1,12 @@
+import logging
 from uuid import UUID
 
+from app.db.session import SessionLocal
 from app.services.job_processing import process_job_in_background
+from app.services.maintenance import run_retention_cleanup
 from app.workers.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 def enqueue_job_processing(
@@ -53,3 +58,18 @@ def process_job(
         user_session_id=UUID(user_session_id),
         retry_row_ids=[UUID(row_id) for row_id in (retry_row_ids or [])],
     )
+
+
+@celery_app.task(name="app.workers.tasks.run_retention_cleanup")
+def run_retention_cleanup_task(*, dry_run: bool = False) -> dict[str, int]:
+    """Delete expired cache/session rows and old terminal jobs on a schedule."""
+
+    with SessionLocal() as db:
+        summary = run_retention_cleanup(db, dry_run=dry_run)
+        if dry_run:
+            db.rollback()
+        else:
+            db.commit()
+
+    logger.info("Retention cleanup finished: %s", summary.to_dict())
+    return summary.to_dict()

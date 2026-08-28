@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
+from html import unescape
 import json
+import re
 from threading import Lock
 from time import monotonic, sleep
-from typing import Any
+from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -197,7 +199,59 @@ def _perform_form_post(url: str, payload: dict[str, Any]) -> tuple[int, str, str
     ) from last_error
 
 
-def _parse_json_response(*, context_label: str, http_status: int, body: str) -> Any:
+def _response_excerpt(body: str, limit: int = 240) -> str:
+    excerpt = " ".join((body or "").strip().split())
+    if len(excerpt) > limit:
+        return f"{excerpt[: limit - 3]}..."
+    return excerpt
+
+
+def _extract_xml_error_text(body: str) -> str | None:
+    match = re.search(r"<error>\s*(.*?)\s*</error>", body or "", flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return unescape(re.sub(r"<[^>]+>", " ", match.group(1))).strip() or None
+
+
+def _extract_missing_record_id(message: str) -> str | None:
+    match = re.search(r"record\s+'([^']+)'\s+not found", message, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip() or None
+    match = re.search(r"do not exist:\s*(.+)$", message, flags=re.IGNORECASE)
+    if match:
+        first_record = match.group(1).split(",")[0].strip()
+        return first_record or None
+    return None
+
+
+def _humanize_locking_module_error(message: str, *, record_id: str | None = None) -> str:
+    cleaned_message = " ".join((message or "").split())
+    missing_record_id = record_id or _extract_missing_record_id(cleaned_message)
+    normalized = cleaned_message.lower()
+    if missing_record_id or "not found" in normalized or "do not exist" in normalized:
+        record_label = f" '{missing_record_id}'" if missing_record_id else ""
+        return (
+            f"Record{record_label} is not visible to this API token. "
+            "If the record exists, it likely belongs to a Data Access Group that this API user cannot access."
+        )
+    return cleaned_message
+
+
+def _raise_module_error(*, context_label: str, http_status: int, body: str, record_id: str | None = None) -> NoReturn:
+    xml_error = _extract_xml_error_text(body)
+    if xml_error:
+        raise RedcapServiceError(_humanize_locking_module_error(xml_error, record_id=record_id))
+
+    excerpt = _response_excerpt(body)
+    status_prefix = f"HTTP {http_status}: " if http_status >= 400 else ""
+    if excerpt:
+        raise RedcapServiceError(
+            f"REDCap returned invalid JSON while fetching {context_label}. {status_prefix}{excerpt}"
+        )
+    raise RedcapServiceError(f"REDCap returned invalid JSON while fetching {context_label}.")
+
+
+def _parse_json_response(*, context_label: str, http_status: int, body: str, record_id: str | None = None) -> Any:
     normalized_body = body.lstrip()
     if normalized_body.lower().startswith("<!doctype") or normalized_body.lower().startswith("<html"):
         raise RedcapServiceError(f"REDCap returned HTML instead of JSON while fetching {context_label}.")
@@ -205,10 +259,14 @@ def _parse_json_response(*, context_label: str, http_status: int, body: str) -> 
     if http_status >= 500:
         raise RedcapServiceError(f"REDCap returned a server error while fetching {context_label}.")
 
+    xml_error = _extract_xml_error_text(normalized_body)
+    if xml_error:
+        raise RedcapServiceError(_humanize_locking_module_error(xml_error, record_id=record_id))
+
     try:
         return json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise RedcapServiceError(f"REDCap returned invalid JSON while fetching {context_label}.") from exc
+    except json.JSONDecodeError:
+        _raise_module_error(context_label=context_label, http_status=http_status, body=body, record_id=record_id)
 
 
 def _post_redcap_json(api_url: str, *, context_label: str, payload: dict[str, Any]) -> Any:
@@ -303,16 +361,22 @@ def _post_locking_module_json(
 ) -> tuple[int, list[dict[str, Any]]]:
     module_url = _build_locking_module_url(api_url, page)
     http_status, body, _ = _perform_form_post(module_url, payload)
-    data = _parse_json_response(context_label=context_label, http_status=http_status, body=body)
+    record_id = str(payload.get("record") or "").strip() or None
+    data = _parse_json_response(
+        context_label=context_label,
+        http_status=http_status,
+        body=body,
+        record_id=record_id,
+    )
     normalized = _normalize_module_response(data, context_label=context_label)
 
     if http_status >= 400:
         error_message = _extract_response_error(data, body.strip() or f"HTTP {http_status}")
-        raise RedcapServiceError(f"REDCap rejected the {context_label} request: {error_message[:240]}")
+        raise RedcapServiceError(_humanize_locking_module_error(error_message, record_id=record_id)[:240])
 
     for row in normalized:
         if "error" in row and isinstance(row["error"], str) and row["error"].strip():
-            raise RedcapServiceError(f"REDCap rejected the {context_label} request: {row['error'].strip()[:240]}")
+            raise RedcapServiceError(_humanize_locking_module_error(row["error"].strip(), record_id=record_id)[:240])
 
     return http_status, normalized
 

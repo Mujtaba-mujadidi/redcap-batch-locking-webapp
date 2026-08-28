@@ -25,6 +25,8 @@ class Settings:
     redis_url: str = getenv("REDIS_URL", "redis://localhost:6379/0")
     celery_broker_url: str = getenv("CELERY_BROKER_URL") or getenv("REDIS_URL", "redis://localhost:6379/0")
     celery_result_backend: str = getenv("CELERY_RESULT_BACKEND") or getenv("REDIS_URL", "redis://localhost:6379/0")
+    terminal_job_retention_days: int = int(getenv("TERMINAL_JOB_RETENTION_DAYS", "30"))
+    maintenance_cleanup_interval_hours: int = int(getenv("MAINTENANCE_CLEANUP_INTERVAL_HOURS", "24"))
 
 
 @lru_cache(maxsize=1)
