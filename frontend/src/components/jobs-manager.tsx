@@ -1,13 +1,15 @@
 "use client";
 
 import type { FormEvent, ReactNode } from "react";
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { PageHeader } from "@/components/page-header";
+import { ReportExportOverlay } from "@/components/report-export-overlay";
 import { StatusPill } from "@/components/status-pill";
 import { TableActionMenu } from "@/components/table-action-menu";
+import { suggestedReportFileName, useReportExport } from "@/hooks/use-report-export";
 import { formatDate } from "@/lib/format";
 import type { BackendActionResult, JobListItem, JobsList, JobStatus } from "@/lib/types";
 
@@ -122,6 +124,11 @@ export function JobsManager({
   const [processError, setProcessError] = useState<string | null>(null);
   const [importProgressStageIndex, setImportProgressStageIndex] = useState(0);
   const [importProgressPercent, setImportProgressPercent] = useState(12);
+  const [refreshingJobs, setRefreshingJobs] = useState(false);
+  const handleReportExportCompleted = useCallback((message: string, tone: "success" | "error") => {
+    setBanner({ message, tone });
+  }, []);
+  const { isExporting, progress, startExport } = useReportExport(handleReportExportCompleted);
   const visibleJobs = jobs.slice(0, 3);
   const importBusy = busyKey === "import";
   const processBusy = Boolean(busyKey?.startsWith("process-"));
@@ -203,6 +210,36 @@ export function JobsManager({
     };
   }, [overlayBusy, overlayStages.length]);
 
+  const loadJobs = useCallback(async (): Promise<boolean> => {
+    const response = await fetch("/api/jobs?limit=3", {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+      },
+      cache: "no-store",
+    });
+
+    if (response.status === 404) {
+      return false;
+    }
+
+    if (response.status === 401) {
+      router.push("/login");
+      return false;
+    }
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const payload = await readJobsList(response);
+    startTransition(() => {
+      setJobs(payload.items);
+      setHasActiveJobsState(payload.has_active_jobs);
+    });
+    return true;
+  }, [router]);
+
   useEffect(() => {
     if (!hasActiveJobsState) {
       return;
@@ -218,51 +255,22 @@ export function JobsManager({
 
       polling = true;
       try {
-        const response = await fetch("/api/jobs?limit=3", {
-          method: "GET",
-          headers: {
-            accept: "application/json",
-          },
-          cache: "no-store",
-        });
- 
-        if (response.status === 404) {
-          return;
-        }
- 
-        if (response.status === 401) {
-          router.push("/login");
-          return;
-        }
- 
-        if (!response.ok) {
-          return;
-        }
- 
-        const payload = await readJobsList(response);
-        if (disposed) {
-          return;
-        }
- 
-        startTransition(() => {
-          setJobs(payload.items);
-          setHasActiveJobsState(payload.has_active_jobs);
-        });
+        await loadJobs();
       } finally {
         polling = false;
       }
     }
- 
+
     void pollJobs();
     const timer = window.setInterval(() => {
       void pollJobs();
     }, 3000);
- 
+
     return () => {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [hasActiveJobsState, router]);
+  }, [hasActiveJobsState, loadJobs]);
  
   function closeProcessModal() {
     setProcessJob(null);
@@ -270,9 +278,17 @@ export function JobsManager({
   }
  
   async function refreshJobs() {
-    router.refresh();
+    setRefreshingJobs(true);
+    try {
+      const updated = await loadJobs();
+      if (!updated) {
+        router.refresh();
+      }
+    } finally {
+      setRefreshingJobs(false);
+    }
   }
- 
+
   async function runAction(
     endpoint: string,
     body?: FormData,
@@ -536,7 +552,20 @@ export function JobsManager({
 
         {hasActiveJobsState ? (
           <div className="banner banner-success queue-banner">
-            At least one request is active right now. Use the refresh button in your browser or revisit this page to watch the queue update.
+            <div className="queue-banner-content">
+              <p>
+                At least one request is active right now. Status updates automatically every few seconds, or
+                click Refresh to check immediately.
+              </p>
+              <button
+                type="button"
+                className="header-action queue-banner-refresh"
+                onClick={() => void refreshJobs()}
+                disabled={refreshingJobs}
+              >
+                {refreshingJobs ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
           </div>
         ) : null}
 
@@ -679,9 +708,19 @@ export function JobsManager({
                                 ) : null}
 
                                 {job.action_kind === "download" && job.report_id ? (
-                                  <a className="table-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
-                                    {job.action_label || "Export Report"}
-                                  </a>
+                                  <button
+                                    type="button"
+                                    className="table-action-menu-button"
+                                    disabled={isExporting}
+                                    onClick={() =>
+                                      void startExport(
+                                        job.report_id!,
+                                        suggestedReportFileName(job.request_file_name),
+                                      )
+                                    }
+                                  >
+                                    {isExporting ? "Exporting..." : job.action_label || "Export Report"}
+                                  </button>
                                 ) : null}
 
                                 {job.remap_label ? (
@@ -736,9 +775,19 @@ export function JobsManager({
                                 ) : null}
 
                                 {job.report_id && job.action_kind !== "download" ? (
-                                  <a className="table-action-menu-link" href={`/api/reports/${job.report_id}/download`}>
-                                    Export Report
-                                  </a>
+                                  <button
+                                    type="button"
+                                    className="table-action-menu-button"
+                                    disabled={isExporting}
+                                    onClick={() =>
+                                      void startExport(
+                                        job.report_id!,
+                                        suggestedReportFileName(job.request_file_name),
+                                      )
+                                    }
+                                  >
+                                    {isExporting ? "Exporting..." : "Export Report"}
+                                  </button>
                                 ) : null}
                             </TableActionMenu>
                           ) : (
@@ -805,6 +854,14 @@ export function JobsManager({
           </form>
         ) : null}
       </ModalFrame>
+
+      <ReportExportOverlay
+        isOpen={isExporting}
+        title={progress.title}
+        copy={progress.copy}
+        stage={progress.stage}
+        percent={progress.percent}
+      />
 
       <div className="progress-overlay" hidden={!overlayBusy}>
         <div className="progress-dialog" role="status" aria-live="polite" aria-atomic="true">

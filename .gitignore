@@ -34,3 +34,12 @@ tmp/
 storage/
 uploads/
 reports/
+.desktop-dev-data/
+.desktop-build-cache/
+desktop/dist/
+desktop/src-tauri/binaries/
+desktop/src-tauri/resources/ui/
+desktop/src-tauri/resources/node/
+desktop/src-tauri/target/
+backend/build/
+backend/dist/

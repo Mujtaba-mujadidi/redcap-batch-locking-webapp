@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from html import unescape
 import json
 import re
+import ssl
 from threading import Lock
 from time import monotonic, sleep
 from typing import Any, NoReturn
@@ -158,6 +159,15 @@ def _build_docker_host_alias_url(url: str) -> str | None:
     return urlunsplit((parts.scheme, replacement_netloc, parts.path, parts.query, parts.fragment))
 
 
+def _build_ssl_context() -> ssl.SSLContext:
+    if get_settings().redcap_ssl_verify:
+        return ssl.create_default_context()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def _perform_form_post(url: str, payload: dict[str, Any]) -> tuple[int, str, str | None]:
     _wait_for_rate_limit_slot(url)
     encoded_payload = urlencode({key: value for key, value in payload.items() if value is not None}).encode("utf-8")
@@ -177,7 +187,7 @@ def _perform_form_post(url: str, payload: dict[str, Any]) -> tuple[int, str, str
             )
 
             try:
-                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS, context=_build_ssl_context()) as response:
                     body = response.read().decode("utf-8", errors="replace")
                     return response.getcode(), body, response.headers.get_content_type()
             except HTTPError as exc:

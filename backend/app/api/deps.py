@@ -4,6 +4,7 @@ from fastapi import Cookie, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.desktop import get_desktop_session
 from app.db.session import get_db_session
 from app.models.enums import Role
 from app.models.session import UserSession
@@ -25,6 +26,12 @@ def get_current_session(
     db: Session = Depends(get_db_session),
     session_token: str | None = Cookie(default=None, alias=settings.session_cookie_name),
 ) -> UserSession:
+    if settings.is_desktop:
+        desktop_session = get_desktop_session(db)
+        if desktop_session is not None:
+            return desktop_session
+        raise _credentials_exception()
+
     if not session_token:
         raise _credentials_exception()
 

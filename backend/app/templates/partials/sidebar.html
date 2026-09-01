@@ -40,7 +40,9 @@
     <div class="brand-copy">
       <strong>REDCap Batch Locking</strong>
       <span>
-        {% if sidebar_user %}
+        {% if is_desktop %}
+          Desktop app
+        {% elif sidebar_user %}
           {{ sidebar_user.role.value.replace("_", " ")|title }}
         {% else %}
           Internal platform

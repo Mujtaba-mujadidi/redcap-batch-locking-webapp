@@ -6,6 +6,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { formatRole } from "@/lib/format";
+import { isDesktopMode } from "@/lib/env";
 import type { AuthUser } from "@/lib/types";
 
 type WorkspaceShellProps = {
@@ -13,12 +14,18 @@ type WorkspaceShellProps = {
   children: ReactNode;
 };
 
-const navItems = [
+const webNavItems = [
   { href: "/app", label: "Dashboard" },
   { href: "/jobs", label: "Jobs" },
   { href: "/mappings", label: "Mappings" },
   { href: "/reports", label: "Reports" },
   { href: "/users", label: "Users" },
+];
+
+const desktopNavItems = [
+  { href: "/jobs", label: "Jobs" },
+  { href: "/mappings", label: "Mappings" },
+  { href: "/reports", label: "Reports" },
 ];
 
 function NavIcon({ label }: { label: string }) {
@@ -77,7 +84,8 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
   const pathname = usePathname();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
-  const canManageUsers = currentUser.role !== "user";
+  const canManageUsers = !isDesktopMode && currentUser.role !== "user";
+  const visibleNavItems = isDesktopMode ? desktopNavItems : webNavItems;
 
   useEffect(() => {
     try {
@@ -150,17 +158,19 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
           </div>
           <div className="brand-copy">
             <strong>REDCap Batch Locking</strong>
-            <span>{formatRole(currentUser.role)}</span>
+            <span>{isDesktopMode ? "Desktop app" : formatRole(currentUser.role)}</span>
           </div>
         </div>
 
-        <div className="sidebar-user-card">
-          <strong>{currentUser.full_name || "Authenticated User"}</strong>
-          <span>{currentUser.email}</span>
-        </div>
+        {!isDesktopMode ? (
+          <div className="sidebar-user-card">
+            <strong>{currentUser.full_name || "Authenticated User"}</strong>
+            <span>{currentUser.email}</span>
+          </div>
+        ) : null}
 
         <nav className="sidebar-nav" aria-label="Workspace navigation">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const isActive = pathname === item.href;
             const isDisabled = item.href === "/users" && !canManageUsers;
 
@@ -197,18 +207,20 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
           })}
         </nav>
 
-        <form className="sidebar-logout-form" action="/api/session/logout" method="post">
-          <button type="submit" className="sidebar-logout">
-            <span className="sidebar-button-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M10 4H5v16h5" />
-                <path d="M14 8l4 4-4 4" />
-                <path d="M18 12H8" />
-              </svg>
-            </span>
-            <span className="sidebar-button-label">Sign Out</span>
-          </button>
-        </form>
+        {!isDesktopMode ? (
+          <form className="sidebar-logout-form" action="/api/session/logout" method="post">
+            <button type="submit" className="sidebar-logout">
+              <span className="sidebar-button-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M10 4H5v16h5" />
+                  <path d="M14 8l4 4-4 4" />
+                  <path d="M18 12H8" />
+                </svg>
+              </span>
+              <span className="sidebar-button-label">Sign Out</span>
+            </button>
+          </form>
+        ) : null}
       </aside>
 
       <main className="dashboard-main workspace-main">

@@ -5,7 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
-from app.core.security import create_session_token, hash_session_token, normalize_email, utc_now, verify_password
+from app.core.security import (
+    create_session_token,
+    ensure_utc_aware,
+    hash_session_token,
+    normalize_email,
+    utc_now,
+    verify_password,
+)
 from app.models.session import UserSession
 from app.models.user import User
 
@@ -55,7 +62,7 @@ def get_valid_session_by_token(db: Session, raw_session_token: str) -> UserSessi
         return None
 
     now = utc_now()
-    if session.revoked_at is not None or session.expires_at <= now:
+    if session.revoked_at is not None or ensure_utc_aware(session.expires_at) <= now:
         return None
 
     if session.user is None or not session.user.is_active:

@@ -26,6 +26,7 @@ from app.models.redcap import REDCapHost
 from app.models.session import UserSession
 from app.models.user import User
 from app.services.audit import record_audit_event
+from app.core.desktop import get_desktop_session
 from app.services.auth import get_valid_session_by_token
 from app.services.mappings import (
     DATE_FORMAT_OPTIONS,
@@ -66,7 +67,7 @@ from app.services.users import (
     set_user_active_state,
     set_user_role,
 )
-from app.workers.tasks import enqueue_job_processing, revoke_job_processing
+from app.services.job_queue import enqueue_job_processing, revoke_job_processing
 
 
 settings = get_settings()
@@ -170,6 +171,12 @@ REQUEST_TEMPLATE_COLUMNS = (
 
 
 def get_optional_session(request: Request, db: Session) -> tuple[str | None, UserSession | None]:
+    if settings.is_desktop:
+        desktop_session = get_desktop_session(db)
+        if desktop_session is not None:
+            db.commit()
+            return None, desktop_session
+
     raw_token = request.cookies.get(settings.session_cookie_name)
     if not raw_token:
         return None, None
@@ -193,6 +200,12 @@ def _build_sidebar_context(*, active_path: str, current_user: User | None = None
             {"label": "Reports", "href": "/reports", "is_active": False, "is_disabled": True},
             {"label": "Users", "href": "/users", "is_active": False, "is_disabled": True},
         ]
+    elif settings.is_desktop:
+        nav_items = [
+            {"label": "Jobs", "href": "/jobs", "is_active": active_path == "/jobs", "is_disabled": False},
+            {"label": "Mappings", "href": "/mappings", "is_active": active_path == "/mappings", "is_disabled": False},
+            {"label": "Reports", "href": "/reports", "is_active": active_path == "/reports", "is_disabled": False},
+        ]
     else:
         nav_items = [
             {"label": "Dashboard", "href": "/app", "is_active": active_path == "/app", "is_disabled": False},
@@ -208,8 +221,9 @@ def _build_sidebar_context(*, active_path: str, current_user: User | None = None
         ]
     return {
         "nav_items": nav_items,
-        "sidebar_user": current_user,
-        "show_logout": current_user is not None,
+        "sidebar_user": None if settings.is_desktop else current_user,
+        "show_logout": current_user is not None and not settings.is_desktop,
+        "is_desktop": settings.is_desktop,
     }
 
 
@@ -3600,7 +3614,7 @@ def process_job_from_ui(
         active_row_count=active_row_count,
         retry_failed_count=int(retry_summary["failed_count"]) if retry_row_ids else 0,
         retry_unprocessed_count=int(retry_summary["unprocessed_count"]) if retry_row_ids else 0,
-        worker_backend="celery",
+        worker_backend="desktop" if settings.is_desktop else "celery",
         worker_task_id=queued_task_id,
     )
     _record_job_event(

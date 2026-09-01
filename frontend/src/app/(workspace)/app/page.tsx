@@ -1,9 +1,15 @@
+import { redirect } from "next/navigation";
+
 import { MetricCard } from "@/components/metric-card";
 import { PageHeader } from "@/components/page-header";
 import { fetchBackendJson } from "@/lib/backend";
+import { isDesktopMode } from "@/lib/env";
 import type { WorkspaceSummary } from "@/lib/types";
 
 export default async function OverviewPage() {
+  if (isDesktopMode) {
+    redirect("/jobs");
+  }
   const summary = await fetchBackendJson<WorkspaceSummary>("/api/v1/workspace/summary");
 
   return (

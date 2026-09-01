@@ -1,0 +1,6 @@
+{
+  "app_expiry_date": "2027-02-28",
+  "backend_origin": "http://127.0.0.1:8765",
+  "frontend_origin": "http://127.0.0.1:3847",
+  "node_version": "20.18.0"
+}

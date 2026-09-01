@@ -785,7 +785,16 @@ code,
 }
 
 .data-table-card {
-  overflow: hidden;
+  overflow: visible;
+}
+
+.reports-table-card {
+  min-height: 24rem;
+  padding-bottom: 5rem;
+}
+
+.reports-table-shell {
+  overflow: visible;
 }
 
 .datatable-controls,
@@ -925,6 +934,7 @@ code,
 
 .data-table th.actions-column,
 .data-table td.actions-column {
+  overflow: visible;
   text-align: center;
 }
 
@@ -1051,6 +1061,23 @@ code,
 
 .queue-banner {
   margin: 0 1.25rem 1rem;
+}
+
+.queue-banner-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.queue-banner-content p {
+  margin: 0;
+  flex: 1 1 16rem;
+}
+
+.queue-banner-refresh {
+  flex: 0 0 auto;
 }
 
 .jobs-panel-header {
@@ -1265,7 +1292,7 @@ code,
   position: absolute;
   top: calc(100% + 0.3rem);
   right: 0;
-  z-index: 20;
+  z-index: 40;
   display: grid;
   min-width: 12rem;
   gap: 0.35rem;
@@ -1274,6 +1301,12 @@ code,
   border-radius: 14px;
   background: #ffffff;
   box-shadow: var(--shadow);
+}
+
+.table-action-menu-list-portal {
+  position: fixed;
+  top: auto;
+  right: auto;
 }
 
 .table-action-menu-form {
@@ -1693,4 +1726,13 @@ body.sidebar-collapsed .sidebar-button-label {
   .import-request-card {
     padding: 1rem;
   }
+}
+
+.desktop-expiry-banner {
+  background: #fff4df;
+  border-bottom: 1px solid #f0d59a;
+  color: #7a4d00;
+  font-size: 0.92rem;
+  padding: 0.65rem 1rem;
+  text-align: center;
 }

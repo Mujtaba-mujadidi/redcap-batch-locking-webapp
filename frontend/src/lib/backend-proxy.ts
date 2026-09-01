@@ -95,7 +95,8 @@ function parseRedirectLocation(location: string | null) {
   const url = new URL(location, backendOrigin);
   const redirectQuery = Object.fromEntries(url.searchParams.entries());
   const successMessage = url.searchParams.get("success");
-  const errorMessage = url.searchParams.get("error");
+  const importErrorMessage = url.searchParams.get("import_error");
+  const errorMessage = url.searchParams.get("error") || importErrorMessage;
 
   return {
     ok: !errorMessage,

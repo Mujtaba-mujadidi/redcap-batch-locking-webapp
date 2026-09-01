@@ -1,0 +1,15 @@
+{
+  "name": "redcap-batch-locking-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build:artifacts": "bash ../scripts/build-desktop-artifacts.sh",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "npm run build:artifacts && tauri build",
+    "build:intel-mac": "TAURI_TARGET=x86_64-apple-darwin npm run build:artifacts && tauri build --target x86_64-apple-darwin"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0"
+  }
+}

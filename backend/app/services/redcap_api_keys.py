@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.security import utc_now
+from app.core.security import ensure_utc_aware, utc_now
 from app.models.redcap_api_key_cache import REDCapApiKeyCache
 
 
@@ -77,7 +77,7 @@ def get_cached_redcap_api_key(
     )
     if cache_entry is None:
         return None
-    if cache_entry.expires_at <= utc_now():
+    if ensure_utc_aware(cache_entry.expires_at) <= utc_now():
         db.delete(cache_entry)
         return None
 
@@ -109,7 +109,7 @@ def has_cached_redcap_api_key(
     )
     if cache_entry is None:
         return False
-    if cache_entry.expires_at <= utc_now():
+    if ensure_utc_aware(cache_entry.expires_at) <= utc_now():
         return False
     try:
         _get_fernet().decrypt(cache_entry.encrypted_api_key.encode("utf-8"))

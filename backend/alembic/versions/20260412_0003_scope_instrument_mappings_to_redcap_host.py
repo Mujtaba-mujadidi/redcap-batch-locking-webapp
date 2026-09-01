@@ -14,17 +14,30 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("instrument_mappings", sa.Column("redcap_host_id", sa.Uuid(), nullable=True))
-    op.create_foreign_key(
-        "fk_instrument_mappings_redcap_host_id_redcap_hosts",
-        "instrument_mappings",
-        "redcap_hosts",
-        ["redcap_host_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-
     bind = op.get_bind()
+    is_sqlite = bind.dialect.name == "sqlite"
+
+    if is_sqlite:
+        with op.batch_alter_table("instrument_mappings") as batch_op:
+            batch_op.add_column(sa.Column("redcap_host_id", sa.Uuid(), nullable=True))
+            batch_op.create_foreign_key(
+                "fk_instrument_mappings_redcap_host_id_redcap_hosts",
+                "redcap_hosts",
+                ["redcap_host_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+    else:
+        op.add_column("instrument_mappings", sa.Column("redcap_host_id", sa.Uuid(), nullable=True))
+        op.create_foreign_key(
+            "fk_instrument_mappings_redcap_host_id_redcap_hosts",
+            "instrument_mappings",
+            "redcap_hosts",
+            ["redcap_host_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+
     mapping_rows = bind.execute(
         sa.text(
             """
@@ -141,16 +154,26 @@ def upgrade() -> None:
                 },
             )
 
-    op.drop_constraint("uq_instrument_mappings_project_instrument", "instrument_mappings", type_="unique")
-    op.create_unique_constraint(
-        "uq_instrument_mappings_host_project_instrument",
-        "instrument_mappings",
-        ["redcap_host_id", "redcap_project_id", "instrument_name"],
-    )
+    if is_sqlite:
+        with op.batch_alter_table("instrument_mappings") as batch_op:
+            batch_op.drop_constraint("uq_instrument_mappings_project_instrument", type_="unique")
+            batch_op.create_unique_constraint(
+                "uq_instrument_mappings_host_project_instrument",
+                ["redcap_host_id", "redcap_project_id", "instrument_name"],
+            )
+    else:
+        op.drop_constraint("uq_instrument_mappings_project_instrument", "instrument_mappings", type_="unique")
+        op.create_unique_constraint(
+            "uq_instrument_mappings_host_project_instrument",
+            "instrument_mappings",
+            ["redcap_host_id", "redcap_project_id", "instrument_name"],
+        )
 
 
 def downgrade() -> None:
     bind = op.get_bind()
+    is_sqlite = bind.dialect.name == "sqlite"
+
     bind.execute(
         sa.text(
             """
@@ -173,11 +196,21 @@ def downgrade() -> None:
         )
     )
 
-    op.drop_constraint("uq_instrument_mappings_host_project_instrument", "instrument_mappings", type_="unique")
-    op.create_unique_constraint(
-        "uq_instrument_mappings_project_instrument",
-        "instrument_mappings",
-        ["redcap_project_id", "instrument_name"],
-    )
-    op.drop_constraint("fk_instrument_mappings_redcap_host_id_redcap_hosts", "instrument_mappings", type_="foreignkey")
-    op.drop_column("instrument_mappings", "redcap_host_id")
+    if is_sqlite:
+        with op.batch_alter_table("instrument_mappings") as batch_op:
+            batch_op.drop_constraint("uq_instrument_mappings_host_project_instrument", type_="unique")
+            batch_op.create_unique_constraint(
+                "uq_instrument_mappings_project_instrument",
+                ["redcap_project_id", "instrument_name"],
+            )
+            batch_op.drop_constraint("fk_instrument_mappings_redcap_host_id_redcap_hosts", type_="foreignkey")
+            batch_op.drop_column("redcap_host_id")
+    else:
+        op.drop_constraint("uq_instrument_mappings_host_project_instrument", "instrument_mappings", type_="unique")
+        op.create_unique_constraint(
+            "uq_instrument_mappings_project_instrument",
+            "instrument_mappings",
+            ["redcap_project_id", "instrument_name"],
+        )
+        op.drop_constraint("fk_instrument_mappings_redcap_host_id_redcap_hosts", "instrument_mappings", type_="foreignkey")
+        op.drop_column("instrument_mappings", "redcap_host_id")

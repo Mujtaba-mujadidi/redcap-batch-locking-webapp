@@ -6,6 +6,7 @@ type JobsPageProps = {
   searchParams?: Promise<{
     success?: string;
     error?: string;
+    import_error?: string;
   }>;
 };
 
@@ -16,7 +17,9 @@ export default async function JobsPage({ searchParams }: JobsPageProps) {
     ? { tone: "success" as const, message: decodeURIComponent(params.success) }
     : params.error
       ? { tone: "error" as const, message: decodeURIComponent(params.error) }
-      : null;
+      : params.import_error
+        ? { tone: "error" as const, message: decodeURIComponent(params.import_error) }
+        : null;
 
   return (
     <JobsManager
