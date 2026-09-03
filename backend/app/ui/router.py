@@ -2029,11 +2029,16 @@ def _row_uses_repeat_context(
     return row.repeat_instance > 1
 
 
+def _normalize_export_instance_token(value: object) -> str:
+    return str(value or "").strip()
+
+
 def _select_exported_record_row(
     export_rows: list[dict[str, object]],
     *,
     record_id_field_name: str,
     row: JobRow,
+    require_repeat_match: bool,
 ) -> dict[str, object] | None:
     if not export_rows:
         return None
@@ -2042,7 +2047,12 @@ def _select_exported_record_row(
         export_row
         for export_row in export_rows
         if str(export_row.get(record_id_field_name) or "").strip() == row.record_id
-    ] or export_rows
+    ]
+    if not filtered_rows:
+        # Record-scoped exports sometimes omit the ID field; keep rows only when none include it.
+        if any(record_id_field_name in export_row for export_row in export_rows):
+            return None
+        filtered_rows = list(export_rows)
 
     if row.event_name:
         event_matches = [
@@ -2052,25 +2062,50 @@ def _select_exported_record_row(
         ]
         if event_matches:
             filtered_rows = event_matches
+        elif any(str(export_row.get("redcap_event_name") or "").strip() for export_row in filtered_rows):
+            return None
 
-    repeat_instrument_matches = [
-        export_row
-        for export_row in filtered_rows
-        if str(export_row.get("redcap_repeat_instrument") or "").strip().lower() == row.target_instrument.strip().lower()
-    ]
-    if repeat_instrument_matches:
-        filtered_rows = repeat_instrument_matches
+    requested_instrument = (row.target_instrument or "").strip().lower()
+    requested_instance = (
+        _normalize_export_instance_token(row.repeat_instance) if row.repeat_instance is not None else ""
+    )
 
-    if row.repeat_instance is not None:
-        repeat_instance_matches = [
+    if require_repeat_match:
+        if not requested_instrument or not requested_instance:
+            return None
+
+        filtered_rows = [
             export_row
             for export_row in filtered_rows
-            if str(export_row.get("redcap_repeat_instance") or "").strip() == str(row.repeat_instance)
+            if str(export_row.get("redcap_repeat_instrument") or "").strip().lower() == requested_instrument
+            and _normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
         ]
-        if repeat_instance_matches:
-            filtered_rows = repeat_instance_matches
+        if len(filtered_rows) != 1:
+            return None
+        return filtered_rows[0]
 
-    return filtered_rows[0] if filtered_rows else None
+    # Non-repeating forms: prefer the base/non-repeat row when identifiers are present.
+    non_repeat_rows = [
+        export_row
+        for export_row in filtered_rows
+        if not str(export_row.get("redcap_repeat_instrument") or "").strip()
+        and not _normalize_export_instance_token(export_row.get("redcap_repeat_instance"))
+    ]
+    if non_repeat_rows:
+        return non_repeat_rows[0]
+
+    if requested_instance:
+        instance_matches = [
+            export_row
+            for export_row in filtered_rows
+            if _normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
+        ]
+        if len(instance_matches) == 1:
+            return instance_matches[0]
+        if instance_matches:
+            return None
+
+    return filtered_rows[0] if len(filtered_rows) == 1 else None
 
 
 def _is_form_marked_complete(value: object) -> bool:
@@ -2085,14 +2120,21 @@ def _fetch_form_complete_snapshot(
     row: JobRow,
     mapping: InstrumentMapping,
     record_id_field_name: str,
+    repeating_forms_events: list[dict[str, object]],
 ) -> tuple[str, object, dict[str, object] | None]:
     form_complete_field_name = mapping.form_complete_field_name or _expected_form_complete_field_name(row.target_instrument)
+    require_repeat_match = _row_uses_repeat_context(row, repeating_forms_events=repeating_forms_events)
+
+    # Including the record ID field forces this REDCap host to return
+    # redcap_repeat_instrument / redcap_repeat_instance. Do not list those
+    # system fields in `fields` — this host rejects them with HTTP 400.
+    export_field_names = [record_id_field_name, form_complete_field_name]
 
     export_rows = export_record_rows(
         api_url,
         api_key,
         record_id=row.record_id,
-        field_names=[form_complete_field_name],
+        field_names=export_field_names,
         form_name=row.target_instrument,
         event_name=row.event_name,
     )
@@ -2100,8 +2142,15 @@ def _fetch_form_complete_snapshot(
         export_rows,
         record_id_field_name=record_id_field_name,
         row=row,
+        require_repeat_match=require_repeat_match,
     )
     if selected_row is None:
+        if require_repeat_match:
+            raise ValueError(
+                "Could not find REDCap form-complete data for "
+                f"instrument '{row.target_instrument}' instance {row.repeat_instance} "
+                f"on record '{row.record_id}'."
+            )
         return form_complete_field_name, None, None
     return form_complete_field_name, selected_row.get(form_complete_field_name), selected_row
 
@@ -3112,9 +3161,23 @@ def run_job_processing(
                                 row=row,
                                 mapping=mapping,
                                 record_id_field_name=record_id_field_name,
+                                repeating_forms_events=repeating_forms_events,
+                            )
+                            selected_repeat_instrument = (
+                                str((form_complete_row or {}).get("redcap_repeat_instrument") or "").strip() or None
+                            )
+                            selected_repeat_instance = (
+                                str((form_complete_row or {}).get("redcap_repeat_instance") or "").strip() or None
                             )
                             processing_steps.append(
-                                f"Read form complete field {form_complete_field_name}: '{form_complete_value if form_complete_value is not None else '<empty>'}'."
+                                f"Read form complete field {form_complete_field_name}: "
+                                f"'{form_complete_value if form_complete_value is not None else '<empty>'}'"
+                                + (
+                                    f" (instrument={selected_repeat_instrument or row.target_instrument}, "
+                                    f"instance={selected_repeat_instance or row.repeat_instance})."
+                                    if selected_repeat_instance or selected_repeat_instrument
+                                    else "."
+                                )
                             )
                             if not _is_form_marked_complete(form_complete_value):
                                 processing_steps.append("Skipped because the form is not marked complete.")
@@ -3127,6 +3190,8 @@ def run_job_processing(
                                     "form_complete_field_name": form_complete_field_name,
                                     "form_complete_value": form_complete_value,
                                     "form_complete_row": form_complete_row,
+                                    "selected_repeat_instrument": selected_repeat_instrument,
+                                    "selected_repeat_instance": selected_repeat_instance,
                                     "action_called": False,
                                     "shadow_fields_phase": "none",
                                 }

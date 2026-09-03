@@ -327,10 +327,8 @@ def _select_locking_response_row(
 ) -> dict[str, Any]:
     if not rows:
         raise RedcapServiceError(f"REDCap returned no rows while fetching {context_label}.")
-    if len(rows) == 1:
-        return rows[0]
 
-    filtered_rows = rows
+    filtered_rows = list(rows)
     requested_instrument = (instrument_name or "").strip().lower()
     if requested_instrument:
         instrument_matches = [
@@ -340,6 +338,10 @@ def _select_locking_response_row(
         ]
         if instrument_matches:
             filtered_rows = instrument_matches
+        elif any(str(row.get("instrument") or row.get("form_name") or "").strip() for row in filtered_rows):
+            raise RedcapServiceError(
+                f"REDCap {context_label} response did not include instrument '{instrument_name}'."
+            )
 
     requested_event = (event_name or "").strip().lower()
     if requested_event:
@@ -350,6 +352,12 @@ def _select_locking_response_row(
         ]
         if event_matches:
             filtered_rows = event_matches
+        elif any(
+            str(row.get("redcap_event_name") or row.get("event_name") or "").strip() for row in filtered_rows
+        ):
+            raise RedcapServiceError(
+                f"REDCap {context_label} response did not include event '{event_name}'."
+            )
 
     if repeat_instance is not None:
         requested_instance = str(repeat_instance).strip()
@@ -358,7 +366,19 @@ def _select_locking_response_row(
         ]
         if instance_matches:
             filtered_rows = instance_matches
+        elif any(str(row.get("instance") or "").strip() for row in filtered_rows):
+            raise RedcapServiceError(
+                f"REDCap {context_label} response did not include "
+                f"instrument '{instrument_name}' instance {repeat_instance}."
+            )
 
+    if not filtered_rows:
+        raise RedcapServiceError(f"REDCap returned no matching rows while fetching {context_label}.")
+    if len(filtered_rows) > 1:
+        raise RedcapServiceError(
+            f"REDCap returned multiple matching rows while fetching {context_label}; "
+            "could not uniquely identify the target form instance."
+        )
     return filtered_rows[0]
 
 
