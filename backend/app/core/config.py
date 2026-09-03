@@ -16,13 +16,10 @@ class Settings:
 
     app_name: str = "REDCap Batch Locking"
     app_version: str = "0.1.0"
-    app_mode: str = getenv("APP_MODE", "web")
+    app_mode: str = getenv("APP_MODE", "desktop")
     app_expiry_date: str | None = getenv("APP_EXPIRY_DATE") or None
     app_data_dir: str | None = getenv("APP_DATA_DIR") or None
-    database_url: str = getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://redcap_app:redcap_app@localhost:5432/redcap_batch_locking",
-    )
+    database_url: str = getenv("DATABASE_URL", "")
     session_cookie_name: str = getenv("SESSION_COOKIE_NAME", "redcap_session")
     session_cookie_secure: bool = getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
     session_cookie_samesite: str = getenv("SESSION_COOKIE_SAMESITE", "lax")
@@ -33,10 +30,7 @@ class Settings:
     redcap_api_key_cache_secret: str = getenv("REDCAP_API_KEY_CACHE_SECRET", "")
     redcap_api_key_cache_ephemeral_secret: str = token_urlsafe(32)
     redcap_rate_limit_per_minute_default: int = int(getenv("REDCAP_RATE_LIMIT_PER_MINUTE_DEFAULT", "300"))
-    redcap_ssl_verify: bool = getenv("REDCAP_SSL_VERIFY", "true").lower() == "true"
-    redis_url: str = getenv("REDIS_URL", "redis://localhost:6379/0")
-    celery_broker_url: str = getenv("CELERY_BROKER_URL") or getenv("REDIS_URL", "redis://localhost:6379/0")
-    celery_result_backend: str = getenv("CELERY_RESULT_BACKEND") or getenv("REDIS_URL", "redis://localhost:6379/0")
+    redcap_ssl_verify: bool = getenv("REDCAP_SSL_VERIFY", "false").lower() == "true"
     terminal_job_retention_days: int = int(getenv("TERMINAL_JOB_RETENTION_DAYS", "30"))
     maintenance_cleanup_interval_hours: int = int(getenv("MAINTENANCE_CLEANUP_INTERVAL_HOURS", "24"))
     desktop_api_host: str = getenv("DESKTOP_API_HOST", "127.0.0.1")
@@ -44,16 +38,19 @@ class Settings:
 
     @property
     def is_desktop(self) -> bool:
-        return self.app_mode.strip().lower() == "desktop"
+        return self.app_mode.strip().lower() != "web"
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
-    settings.app_mode = getenv("APP_MODE", "web")
-    settings.redcap_ssl_verify = getenv("REDCAP_SSL_VERIFY", "true").lower() == "true"
-    if settings.is_desktop:
+    settings.app_mode = getenv("APP_MODE", "desktop")
+    settings.redcap_ssl_verify = getenv("REDCAP_SSL_VERIFY", "false").lower() == "true"
+    if not settings.database_url.strip():
         settings.database_url = _build_desktop_database_url(settings.app_data_dir)
+    if settings.is_desktop:
+        if not getenv("DATABASE_URL"):
+            settings.database_url = _build_desktop_database_url(settings.app_data_dir)
         if not settings.redcap_api_key_cache_secret:
             settings.redcap_api_key_cache_secret = "desktop-local-redcap-api-key-cache-secret"
         if getenv("REDCAP_SSL_VERIFY") is None:

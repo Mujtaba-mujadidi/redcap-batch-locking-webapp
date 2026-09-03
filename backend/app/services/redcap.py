@@ -20,8 +20,6 @@ from app.core.config import get_settings
 REQUEST_TIMEOUT_SECONDS = 20
 NETWORK_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_BACKOFF_SECONDS = 1.5
-LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
-DOCKER_HOST_ALIAS = "host.docker.internal"
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 settings = get_settings()
 _rate_limit_registry_lock = Lock()
@@ -34,6 +32,15 @@ _rate_limit_scope_key_var: ContextVar[str | None] = ContextVar("redcap_rate_limi
 
 class RedcapServiceError(Exception):
     """Raised when REDCap preflight or request handling fails."""
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    if get_settings().redcap_ssl_verify:
+        return ssl.create_default_context()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 @contextmanager
@@ -149,55 +156,31 @@ def _wait_for_rate_limit_slot(api_url: str) -> None:
         sleep(wait_seconds)
 
 
-def _build_docker_host_alias_url(url: str) -> str | None:
-    parts = urlsplit(url)
-    if parts.hostname not in LOOPBACK_HOSTS:
-        return None
-
-    hostname = parts.hostname or ""
-    replacement_netloc = parts.netloc.replace(hostname, DOCKER_HOST_ALIAS, 1)
-    return urlunsplit((parts.scheme, replacement_netloc, parts.path, parts.query, parts.fragment))
-
-
-def _build_ssl_context() -> ssl.SSLContext:
-    if get_settings().redcap_ssl_verify:
-        return ssl.create_default_context()
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
-
-
 def _perform_form_post(url: str, payload: dict[str, Any]) -> tuple[int, str, str | None]:
     _wait_for_rate_limit_slot(url)
     encoded_payload = urlencode({key: value for key, value in payload.items() if value is not None}).encode("utf-8")
-    fallback_url = _build_docker_host_alias_url(url)
-    candidate_urls = [url]
-    if fallback_url and fallback_url != url:
-        candidate_urls.append(fallback_url)
 
     last_error: URLError | None = None
-    for candidate_url in candidate_urls:
-        for attempt in range(1, NETWORK_RETRY_ATTEMPTS + 1):
-            request = Request(
-                candidate_url,
-                data=encoded_payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                method="POST",
-            )
+    for attempt in range(1, NETWORK_RETRY_ATTEMPTS + 1):
+        request = Request(
+            url,
+            data=encoded_payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
 
-            try:
-                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS, context=_build_ssl_context()) as response:
-                    body = response.read().decode("utf-8", errors="replace")
-                    return response.getcode(), body, response.headers.get_content_type()
-            except HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                return exc.code, body, exc.headers.get_content_type()
-            except URLError as exc:
-                last_error = exc
-                if attempt < NETWORK_RETRY_ATTEMPTS:
-                    sleep(NETWORK_RETRY_BACKOFF_SECONDS * attempt)
-                continue
+        try:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS, context=_build_ssl_context()) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                return response.getcode(), body, response.headers.get_content_type()
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            return exc.code, body, exc.headers.get_content_type()
+        except URLError as exc:
+            last_error = exc
+            if attempt < NETWORK_RETRY_ATTEMPTS:
+                sleep(NETWORK_RETRY_BACKOFF_SECONDS * attempt)
+            continue
 
     reason = "Unknown network error."
     if last_error is not None:

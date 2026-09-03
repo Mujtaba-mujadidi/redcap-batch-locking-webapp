@@ -1,7 +1,6 @@
 import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
 
-import { backendOrigin, isDesktopMode } from "@/lib/env";
+import { backendOrigin } from "@/lib/env";
 import type { SessionEnvelope } from "@/lib/types";
 
 export class BackendRequestError extends Error {
@@ -61,9 +60,6 @@ export async function fetchBackendJson<T>(
   init: RequestInit = {},
 ): Promise<T> {
   const response = await fetchBackend(path, init);
-  if (response.status === 401 && !isDesktopMode) {
-    redirect("/login");
-  }
   if (!response.ok) {
     throw new BackendRequestError(await extractErrorMessage(response), response.status);
   }
@@ -83,9 +79,6 @@ export async function getSession(): Promise<SessionEnvelope | null> {
 
 export async function requireSession(): Promise<SessionEnvelope> {
   const session = await getSession();
-  if (session === null && !isDesktopMode) {
-    redirect("/login");
-  }
   if (session === null) {
     throw new BackendRequestError("Desktop session is unavailable.", 503);
   }

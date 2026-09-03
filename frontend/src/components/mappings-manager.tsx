@@ -74,7 +74,6 @@ export function MappingsManager({
       });
       const result = await readActionResult(response);
       if (response.status === 401) {
-        router.push("/login");
         return null;
       }
       return result;

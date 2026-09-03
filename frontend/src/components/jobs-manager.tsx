@@ -224,7 +224,6 @@ export function JobsManager({
     }
 
     if (response.status === 401) {
-      router.push("/login");
       return false;
     }
 
@@ -313,7 +312,6 @@ export function JobsManager({
         };
       }
       if (response.status === 401) {
-        router.push("/login");
         return null;
       }
       if (!response.ok || !result.ok) {

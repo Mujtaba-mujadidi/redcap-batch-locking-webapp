@@ -167,7 +167,7 @@ export async function proxyBackendDownload(
 
   const parsedRedirect = parseRedirectLocation(response.headers.get("location"));
   if (parsedRedirect.unauthorized) {
-    return NextResponse.redirect(new URL("/login", request.url), 303);
+    return NextResponse.json(parsedRedirect, { status: 401 });
   }
 
   const downloadResponse = new NextResponse(await response.arrayBuffer(), {

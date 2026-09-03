@@ -35,8 +35,6 @@ hiddenimports = [
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
     "passlib.handlers.bcrypt",
-    "psycopg",
-    "psycopg_binary",
 ]
 
 a = Analysis(

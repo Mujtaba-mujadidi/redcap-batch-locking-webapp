@@ -24,31 +24,25 @@ app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=li
 app.mount("/static", StaticFiles(directory=str(app_dir / "static")), name="static")
 app.include_router(ui_router)
 app.include_router(api_router)
-
-if settings.is_desktop:
-    app.add_middleware(DesktopExpiryMiddleware)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://localhost:3847",
-            "http://127.0.0.1:3847",
-            "tauri://localhost",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+app.add_middleware(DesktopExpiryMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3847",
+        "http://127.0.0.1:3847",
+        "tauri://localhost",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
 def health():
-    payload: dict[str, object] = {
+    return {
         "status": "ok",
         "version": settings.app_version,
         "mode": settings.app_mode,
+        "redcap_ssl_verify": settings.redcap_ssl_verify,
     }
-    if settings.is_desktop:
-        payload["redcap_ssl_verify"] = settings.redcap_ssl_verify
-    return payload

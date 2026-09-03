@@ -5,8 +5,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
-import { formatRole } from "@/lib/format";
-import { isDesktopMode } from "@/lib/env";
 import type { AuthUser } from "@/lib/types";
 
 type WorkspaceShellProps = {
@@ -14,15 +12,7 @@ type WorkspaceShellProps = {
   children: ReactNode;
 };
 
-const webNavItems = [
-  { href: "/app", label: "Dashboard" },
-  { href: "/jobs", label: "Jobs" },
-  { href: "/mappings", label: "Mappings" },
-  { href: "/reports", label: "Reports" },
-  { href: "/users", label: "Users" },
-];
-
-const desktopNavItems = [
+const navItems = [
   { href: "/jobs", label: "Jobs" },
   { href: "/mappings", label: "Mappings" },
   { href: "/reports", label: "Reports" },
@@ -30,14 +20,6 @@ const desktopNavItems = [
 
 function NavIcon({ label }: { label: string }) {
   switch (label) {
-    case "Dashboard":
-      return (
-        <svg viewBox="0 0 24 24">
-          <path d="M4 10.5 12 4l8 6.5" />
-          <path d="M6.5 9.5V20h11V9.5" />
-          <path d="M10 20v-5h4v5" />
-        </svg>
-      );
     case "Jobs":
       return (
         <svg viewBox="0 0 24 24">
@@ -73,19 +55,15 @@ function NavIcon({ label }: { label: string }) {
         <svg viewBox="0 0 24 24">
           <path d="M16 19a4 4 0 0 0-8 0" />
           <circle cx="12" cy="10" r="3" />
-          <path d="M20 19a4 4 0 0 0-3-3.87" />
-          <path d="M17 6.4A3 3 0 0 1 17 12" />
         </svg>
       );
   }
 }
 
-export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
+export function WorkspaceShell({ children }: WorkspaceShellProps) {
   const pathname = usePathname();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
-  const canManageUsers = !isDesktopMode && currentUser.role !== "user";
-  const visibleNavItems = isDesktopMode ? desktopNavItems : webNavItems;
 
   useEffect(() => {
     try {
@@ -158,69 +136,27 @@ export function WorkspaceShell({ currentUser, children }: WorkspaceShellProps) {
           </div>
           <div className="brand-copy">
             <strong>REDCap Batch Locking</strong>
-            <span>{isDesktopMode ? "Desktop app" : formatRole(currentUser.role)}</span>
+            <span>Desktop app</span>
           </div>
         </div>
 
-        {!isDesktopMode ? (
-          <div className="sidebar-user-card">
-            <strong>{currentUser.full_name || "Authenticated User"}</strong>
-            <span>{currentUser.email}</span>
-          </div>
-        ) : null}
-
         <nav className="sidebar-nav" aria-label="Workspace navigation">
-          {visibleNavItems.map((item) => {
+          {navItems.map((item) => {
             const isActive = pathname === item.href;
-            const isDisabled = item.href === "/users" && !canManageUsers;
-
-            const content = (
-              <>
-                <span className="nav-icon" aria-hidden="true">
-                  <NavIcon label={item.label} />
-                </span>
-                <span className="nav-label">{item.label}</span>
-              </>
-            );
-
-            if (isDisabled) {
-              return (
-                <span
-                  key={item.href}
-                  className={`nav-item is-disabled${isActive ? " is-active" : ""}`}
-                  title={item.label}
-                >
-                  {content}
-                </span>
-              );
-            }
-
             return (
               <Link
                 key={item.href}
                 href={item.href}
                 className={`nav-item${isActive ? " is-active" : ""}`}
               >
-                {content}
+                <span className="nav-icon" aria-hidden="true">
+                  <NavIcon label={item.label} />
+                </span>
+                <span className="nav-label">{item.label}</span>
               </Link>
             );
           })}
         </nav>
-
-        {!isDesktopMode ? (
-          <form className="sidebar-logout-form" action="/api/session/logout" method="post">
-            <button type="submit" className="sidebar-logout">
-              <span className="sidebar-button-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="M10 4H5v16h5" />
-                  <path d="M14 8l4 4-4 4" />
-                  <path d="M18 12H8" />
-                </svg>
-              </span>
-              <span className="sidebar-button-label">Sign Out</span>
-            </button>
-          </form>
-        ) : null}
       </aside>
 
       <main className="dashboard-main workspace-main">

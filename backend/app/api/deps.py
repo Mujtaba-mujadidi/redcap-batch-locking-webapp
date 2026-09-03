@@ -1,18 +1,13 @@
 from collections.abc import Callable
 
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.desktop import get_desktop_session
 from app.db.session import get_db_session
 from app.models.enums import Role
 from app.models.session import UserSession
 from app.models.user import User
-from app.services.auth import get_valid_session_by_token
-
-
-settings = get_settings()
 
 
 def _credentials_exception() -> HTTPException:
@@ -22,24 +17,11 @@ def _credentials_exception() -> HTTPException:
     )
 
 
-def get_current_session(
-    db: Session = Depends(get_db_session),
-    session_token: str | None = Cookie(default=None, alias=settings.session_cookie_name),
-) -> UserSession:
-    if settings.is_desktop:
-        desktop_session = get_desktop_session(db)
-        if desktop_session is not None:
-            return desktop_session
-        raise _credentials_exception()
-
-    if not session_token:
-        raise _credentials_exception()
-
-    session = get_valid_session_by_token(db, session_token)
-    if session is None:
-        raise _credentials_exception()
-
-    return session
+def get_current_session(db: Session = Depends(get_db_session)) -> UserSession:
+    desktop_session = get_desktop_session(db)
+    if desktop_session is not None:
+        return desktop_session
+    raise _credentials_exception()
 
 
 def get_current_user(current_session: UserSession = Depends(get_current_session)) -> User:

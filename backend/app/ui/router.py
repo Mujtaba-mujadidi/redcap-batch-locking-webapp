@@ -3679,7 +3679,7 @@ def process_job_from_ui(
         active_row_count=active_row_count,
         retry_failed_count=int(retry_summary["failed_count"]) if retry_row_ids else 0,
         retry_unprocessed_count=int(retry_summary["unprocessed_count"]) if retry_row_ids else 0,
-        worker_backend="desktop" if settings.is_desktop else "celery",
+        worker_backend="desktop",
         worker_task_id=queued_task_id,
     )
     _record_job_event(

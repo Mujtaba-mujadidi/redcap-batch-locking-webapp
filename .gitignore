@@ -43,3 +43,4 @@ desktop/src-tauri/resources/node/
 desktop/src-tauri/target/
 backend/build/
 backend/dist/
+*.tsbuildinfo
