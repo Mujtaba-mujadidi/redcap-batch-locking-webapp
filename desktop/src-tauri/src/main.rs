@@ -1,4 +1,5 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -92,6 +93,30 @@ fn spawn_ui_server(app: &AppHandle, state: &State<SidecarState>) -> Result<(), S
         return Err(format!("Next.js server not found at {}", server_script.display()));
     }
 
+    // Keep UI sidecar logs so packaged failures are diagnosable.
+    let (ui_stdout, ui_stderr) = match app.path().app_log_dir() {
+        Ok(log_dir) => {
+            let _ = fs::create_dir_all(&log_dir);
+            let stdout = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("ui-stdout.log"))
+                .ok()
+                .map(Stdio::from);
+            let stderr = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("ui-stderr.log"))
+                .ok()
+                .map(Stdio::from);
+            (
+                stdout.unwrap_or_else(Stdio::null),
+                stderr.unwrap_or_else(Stdio::null),
+            )
+        }
+        Err(_) => (Stdio::null(), Stdio::null()),
+    };
+
     let child = Command::new(node_binary)
         .arg(server_script)
         .current_dir(&ui_dir)
@@ -99,8 +124,9 @@ fn spawn_ui_server(app: &AppHandle, state: &State<SidecarState>) -> Result<(), S
         .env("HOSTNAME", "127.0.0.1")
         .env("NODE_ENV", "production")
         .env("BACKEND_ORIGIN", "http://127.0.0.1:8765")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .env("NEXT_PUBLIC_APP_MODE", "desktop")
+        .stdout(ui_stdout)
+        .stderr(ui_stderr)
         .spawn()
         .map_err(|error| format!("Failed to start UI server: {error}"))?;
 

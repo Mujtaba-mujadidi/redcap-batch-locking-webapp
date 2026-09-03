@@ -68,6 +68,22 @@ from app.services.users import (
     set_user_role,
 )
 from app.services.job_queue import enqueue_job_processing, revoke_job_processing
+from app.services.job_constants import (
+    ACTIVE_JOB_STATUSES,
+    JOBS_VISIBLE_STATUSES,
+    MAPPING_AUTO_OPTION,
+    MAPPING_NONE_OPTION,
+    PRESTART_CANCELLABLE_JOB_STATUSES,
+    REPORTABLE_JOB_STATUSES,
+    USER_CANCELLABLE_JOB_STATUSES,
+)
+from app.services.form_complete import (
+    expected_form_complete_field_name,
+    fetch_form_complete_snapshot,
+    is_form_marked_complete,
+    row_uses_repeat_context,
+    select_exported_record_row,
+)
 
 
 settings = get_settings()
@@ -80,8 +96,6 @@ REQUEST_TEMPLATE_FILENAME = "redcap-batch-request-template.csv"
 PROCESS_MODAL_ID = "process-job-modal"
 REQUEST_REQUIRED_COLUMNS = ("record_id", "target_instrument", "action")
 REQUEST_ALLOWED_ACTIONS = {"lock", "unlock"}
-MAPPING_NONE_OPTION = "__NONE__"
-MAPPING_AUTO_OPTION = "__AUTO__"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 MAX_FILENAME_LENGTH = 255
 MAX_TEXT_INPUT_LENGTH = 2048
@@ -95,40 +109,6 @@ QUERY_COLUMN_ALIASES = {
     "status": {"status", "query status"},
     "event": {"event", "redcap event name"},
     "instance": {"instance", "repeat instance", "redcap repeat instance"},
-}
-JOBS_VISIBLE_STATUSES = (
-    JobStatus.AWAITING_MAPPING_CONFIRMATION,
-    JobStatus.READY,
-    JobStatus.QUEUED,
-    JobStatus.RUNNING,
-    JobStatus.WAITING_DUE_TO_RATE_LIMIT,
-    JobStatus.CANCEL_REQUESTED,
-    JobStatus.CANCELLED,
-    JobStatus.COMPLETED,
-    JobStatus.COMPLETED_WITH_ERRORS,
-    JobStatus.FAILED,
-)
-REPORTABLE_JOB_STATUSES = {
-    JobStatus.CANCELLED,
-    JobStatus.COMPLETED,
-    JobStatus.COMPLETED_WITH_ERRORS,
-    JobStatus.FAILED,
-}
-ACTIVE_JOB_STATUSES = {
-    JobStatus.QUEUED,
-    JobStatus.RUNNING,
-    JobStatus.WAITING_DUE_TO_RATE_LIMIT,
-    JobStatus.CANCEL_REQUESTED,
-}
-PRESTART_CANCELLABLE_JOB_STATUSES = {
-    JobStatus.AWAITING_MAPPING_CONFIRMATION,
-    JobStatus.READY,
-    JobStatus.QUEUED,
-}
-USER_CANCELLABLE_JOB_STATUSES = {
-    *PRESTART_CANCELLABLE_JOB_STATUSES,
-    JobStatus.RUNNING,
-    JobStatus.WAITING_DUE_TO_RATE_LIMIT,
 }
 REQUEST_TEMPLATE_COLUMNS = (
     {
@@ -959,7 +939,7 @@ def _mapping_fields_exist(mapping: InstrumentMapping, field_names: set[str]) -> 
 
 
 def _expected_form_complete_field_name(instrument_name: str) -> str:
-    return f"{instrument_name}_complete"
+    return expected_form_complete_field_name(instrument_name)
 
 
 def _apply_inferred_mapping_defaults(mapping: InstrumentMapping, review: dict[str, object]) -> None:
@@ -1993,166 +1973,12 @@ def _normalize_query_match_counts(raw_value: object) -> dict[int, int]:
     return query_match_counts
 
 
-def _row_uses_repeat_context(
-    row: JobRow,
-    *,
-    repeating_forms_events: list[dict[str, object]],
-) -> bool:
-    if row.repeat_instance is None:
-        return False
-
-    if not repeating_forms_events:
-        return row.repeat_instance > 1
-
-    requested_event = (row.event_name or "").strip().lower()
-    requested_instrument = (row.target_instrument or "").strip().lower()
-    for repeat_row in repeating_forms_events:
-        repeat_instrument = str(
-            repeat_row.get("form_name")
-            or repeat_row.get("instrument_name")
-            or repeat_row.get("redcap_repeat_instrument")
-            or ""
-        ).strip().lower()
-        repeat_event = str(
-            repeat_row.get("unique_event_name")
-            or repeat_row.get("event_name")
-            or repeat_row.get("redcap_event_name")
-            or ""
-        ).strip().lower()
-
-        same_instrument = repeat_instrument == requested_instrument if repeat_instrument else False
-        same_event = repeat_event == requested_event if repeat_event and requested_event else False
-        is_repeating_event = not repeat_instrument and same_event
-        if same_instrument or is_repeating_event:
-            return True
-
-    return row.repeat_instance > 1
-
-
-def _normalize_export_instance_token(value: object) -> str:
-    return str(value or "").strip()
-
-
-def _select_exported_record_row(
-    export_rows: list[dict[str, object]],
-    *,
-    record_id_field_name: str,
-    row: JobRow,
-    require_repeat_match: bool,
-) -> dict[str, object] | None:
-    if not export_rows:
-        return None
-
-    filtered_rows = [
-        export_row
-        for export_row in export_rows
-        if str(export_row.get(record_id_field_name) or "").strip() == row.record_id
-    ]
-    if not filtered_rows:
-        # Record-scoped exports sometimes omit the ID field; keep rows only when none include it.
-        if any(record_id_field_name in export_row for export_row in export_rows):
-            return None
-        filtered_rows = list(export_rows)
-
-    if row.event_name:
-        event_matches = [
-            export_row
-            for export_row in filtered_rows
-            if str(export_row.get("redcap_event_name") or "").strip().lower() == row.event_name.strip().lower()
-        ]
-        if event_matches:
-            filtered_rows = event_matches
-        elif any(str(export_row.get("redcap_event_name") or "").strip() for export_row in filtered_rows):
-            return None
-
-    requested_instrument = (row.target_instrument or "").strip().lower()
-    requested_instance = (
-        _normalize_export_instance_token(row.repeat_instance) if row.repeat_instance is not None else ""
-    )
-
-    if require_repeat_match:
-        if not requested_instrument or not requested_instance:
-            return None
-
-        filtered_rows = [
-            export_row
-            for export_row in filtered_rows
-            if str(export_row.get("redcap_repeat_instrument") or "").strip().lower() == requested_instrument
-            and _normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
-        ]
-        if len(filtered_rows) != 1:
-            return None
-        return filtered_rows[0]
-
-    # Non-repeating forms: prefer the base/non-repeat row when identifiers are present.
-    non_repeat_rows = [
-        export_row
-        for export_row in filtered_rows
-        if not str(export_row.get("redcap_repeat_instrument") or "").strip()
-        and not _normalize_export_instance_token(export_row.get("redcap_repeat_instance"))
-    ]
-    if non_repeat_rows:
-        return non_repeat_rows[0]
-
-    if requested_instance:
-        instance_matches = [
-            export_row
-            for export_row in filtered_rows
-            if _normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
-        ]
-        if len(instance_matches) == 1:
-            return instance_matches[0]
-        if instance_matches:
-            return None
-
-    return filtered_rows[0] if len(filtered_rows) == 1 else None
-
-
-def _is_form_marked_complete(value: object) -> bool:
-    normalized_value = str(value or "").strip().lower()
-    return normalized_value in {"2", "complete"}
-
-
-def _fetch_form_complete_snapshot(
-    *,
-    api_url: str,
-    api_key: str,
-    row: JobRow,
-    mapping: InstrumentMapping,
-    record_id_field_name: str,
-    repeating_forms_events: list[dict[str, object]],
-) -> tuple[str, object, dict[str, object] | None]:
-    form_complete_field_name = mapping.form_complete_field_name or _expected_form_complete_field_name(row.target_instrument)
-    require_repeat_match = _row_uses_repeat_context(row, repeating_forms_events=repeating_forms_events)
-
-    # Including the record ID field forces this REDCap host to return
-    # redcap_repeat_instrument / redcap_repeat_instance. Do not list those
-    # system fields in `fields` — this host rejects them with HTTP 400.
-    export_field_names = [record_id_field_name, form_complete_field_name]
-
-    export_rows = export_record_rows(
-        api_url,
-        api_key,
-        record_id=row.record_id,
-        field_names=export_field_names,
-        form_name=row.target_instrument,
-        event_name=row.event_name,
-    )
-    selected_row = _select_exported_record_row(
-        export_rows,
-        record_id_field_name=record_id_field_name,
-        row=row,
-        require_repeat_match=require_repeat_match,
-    )
-    if selected_row is None:
-        if require_repeat_match:
-            raise ValueError(
-                "Could not find REDCap form-complete data for "
-                f"instrument '{row.target_instrument}' instance {row.repeat_instance} "
-                f"on record '{row.record_id}'."
-            )
-        return form_complete_field_name, None, None
-    return form_complete_field_name, selected_row.get(form_complete_field_name), selected_row
+# Thin aliases so existing call sites in this module keep working while the
+# real implementations live in app.services.form_complete.
+_row_uses_repeat_context = row_uses_repeat_context
+_select_exported_record_row = select_exported_record_row
+_is_form_marked_complete = is_form_marked_complete
+_fetch_form_complete_snapshot = fetch_form_complete_snapshot
 
 
 def _format_redcap_temporal_value(

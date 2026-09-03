@@ -18,35 +18,16 @@ from app.models.mapping import InstrumentMapping
 from app.models.redcap import REDCapHost
 from app.models.session import UserSession
 from app.models.user import User
+from app.services.job_constants import (
+    ACTIVE_JOB_STATUSES,
+    JOBS_VISIBLE_STATUSES,
+    REPORTABLE_JOB_STATUSES,
+)
 
 
 settings = get_settings()
 
 MAX_FILENAME_LENGTH = 255
-ACTIVE_JOB_STATUSES = {
-    JobStatus.QUEUED,
-    JobStatus.RUNNING,
-    JobStatus.WAITING_DUE_TO_RATE_LIMIT,
-    JobStatus.CANCEL_REQUESTED,
-}
-JOBS_VISIBLE_STATUSES = (
-    JobStatus.AWAITING_MAPPING_CONFIRMATION,
-    JobStatus.READY,
-    JobStatus.QUEUED,
-    JobStatus.RUNNING,
-    JobStatus.WAITING_DUE_TO_RATE_LIMIT,
-    JobStatus.CANCEL_REQUESTED,
-    JobStatus.CANCELLED,
-    JobStatus.COMPLETED,
-    JobStatus.COMPLETED_WITH_ERRORS,
-    JobStatus.FAILED,
-)
-REPORTABLE_JOB_STATUSES = {
-    JobStatus.CANCELLED,
-    JobStatus.COMPLETED,
-    JobStatus.COMPLETED_WITH_ERRORS,
-    JobStatus.FAILED,
-}
 
 
 def can_manage_users(user: User) -> bool:

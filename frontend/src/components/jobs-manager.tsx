@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent, ReactNode } from "react";
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -9,9 +9,10 @@ import { PageHeader } from "@/components/page-header";
 import { ReportExportOverlay } from "@/components/report-export-overlay";
 import { StatusPill } from "@/components/status-pill";
 import { TableActionMenu } from "@/components/table-action-menu";
+import { useJobsPolling } from "@/hooks/use-jobs-polling";
 import { suggestedReportFileName, useReportExport } from "@/hooks/use-report-export";
 import { formatDate } from "@/lib/format";
-import type { BackendActionResult, JobListItem, JobsList, JobStatus } from "@/lib/types";
+import type { BackendActionResult, JobListItem, JobStatus } from "@/lib/types";
 
 type BannerState =
   | {
@@ -28,10 +29,6 @@ type JobsManagerProps = {
 
 async function readActionResult(response: Response): Promise<BackendActionResult> {
   return (await response.json()) as BackendActionResult;
-}
-
-async function readJobsList(response: Response): Promise<JobsList> {
-  return (await response.json()) as JobsList;
 }
 
 function processModeLabel(mode: string | null): string {
@@ -114,8 +111,14 @@ export function JobsManager({
 }: JobsManagerProps) {
   const router = useRouter();
   const importFormRef = useRef<HTMLFormElement | null>(null);
-  const [jobs, setJobs] = useState(initialJobs);
-  const [hasActiveJobsState, setHasActiveJobsState] = useState(hasActiveJobs);
+  const {
+    jobs,
+    setJobs,
+    hasActiveJobsState,
+    setHasActiveJobsState,
+    isRefreshingJobs: refreshingJobs,
+    refreshJobs: pollJobs,
+  } = useJobsPolling(initialJobs, hasActiveJobs);
   const [banner, setBanner] = useState<BannerState>(initialBanner);
   const [importOpen, setImportOpen] = useState(false);
   const [importApiUrl, setImportApiUrl] = useState("");
@@ -124,7 +127,6 @@ export function JobsManager({
   const [processError, setProcessError] = useState<string | null>(null);
   const [importProgressStageIndex, setImportProgressStageIndex] = useState(0);
   const [importProgressPercent, setImportProgressPercent] = useState(12);
-  const [refreshingJobs, setRefreshingJobs] = useState(false);
   const handleReportExportCompleted = useCallback((message: string, tone: "success" | "error") => {
     setBanner({ message, tone });
   }, []);
@@ -143,11 +145,11 @@ export function JobsManager({
 
   useEffect(() => {
     setJobs(initialJobs);
-  }, [initialJobs]);
+  }, [initialJobs, setJobs]);
 
   useEffect(() => {
     setHasActiveJobsState(hasActiveJobs);
-  }, [hasActiveJobs]);
+  }, [hasActiveJobs, setHasActiveJobsState]);
 
   useEffect(() => {
     setBanner(initialBanner);
@@ -210,81 +212,15 @@ export function JobsManager({
     };
   }, [overlayBusy, overlayStages.length]);
 
-  const loadJobs = useCallback(async (): Promise<boolean> => {
-    const response = await fetch("/api/jobs?limit=3", {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-      },
-      cache: "no-store",
-    });
-
-    if (response.status === 404) {
-      return false;
-    }
-
-    if (response.status === 401) {
-      return false;
-    }
-
-    if (!response.ok) {
-      return false;
-    }
-
-    const payload = await readJobsList(response);
-    startTransition(() => {
-      setJobs(payload.items);
-      setHasActiveJobsState(payload.has_active_jobs);
-    });
-    return true;
-  }, [router]);
-
-  useEffect(() => {
-    if (!hasActiveJobsState) {
-      return;
-    }
-
-    let disposed = false;
-    let polling = false;
-
-    async function pollJobs() {
-      if (polling || disposed) {
-        return;
-      }
-
-      polling = true;
-      try {
-        await loadJobs();
-      } finally {
-        polling = false;
-      }
-    }
-
-    void pollJobs();
-    const timer = window.setInterval(() => {
-      void pollJobs();
-    }, 3000);
-
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [hasActiveJobsState, loadJobs]);
- 
   function closeProcessModal() {
     setProcessJob(null);
     setProcessError(null);
   }
- 
+
   async function refreshJobs() {
-    setRefreshingJobs(true);
-    try {
-      const updated = await loadJobs();
-      if (!updated) {
-        router.refresh();
-      }
-    } finally {
-      setRefreshingJobs(false);
+    const updated = await pollJobs();
+    if (!updated) {
+      router.refresh();
     }
   }
 

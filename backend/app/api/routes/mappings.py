@@ -17,7 +17,8 @@ from app.schemas.mappings import (
     MappingReviewRowDetailRead,
 )
 from app.services.mappings import DATE_FORMAT_OPTIONS, get_mapping_label_aliases, refresh_mapping_review_bundle
-from app.services.workspace_views import build_mapping_review, host_label_for_job
+from app.services.job_constants import MAPPING_AUTO_OPTION, MAPPING_NONE_OPTION
+from app.services.workspace_views import build_mapping_review, get_mapping_job, host_label_for_job
 from app.ui import router as legacy_ui
 
 
@@ -48,7 +49,7 @@ def mapping_review_detail(
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ) -> MappingReviewDetailRead:
-    job = legacy_ui._get_mapping_job(db, current_user=current_user, job_id=job_id)
+    job = get_mapping_job(db, current_user=current_user, job_id=job_id)
     if job is None:
         return MappingReviewDetailRead(
             job_id=None,
@@ -59,8 +60,8 @@ def mapping_review_detail(
             host_label=None,
             refresh_decision_pending=False,
             confirmed_mapping_count=0,
-            mapping_none_option=legacy_ui.MAPPING_NONE_OPTION,
-            mapping_auto_option=legacy_ui.MAPPING_AUTO_OPTION,
+            mapping_none_option=MAPPING_NONE_OPTION,
+            mapping_auto_option=MAPPING_AUTO_OPTION,
             date_format_options=sorted(DATE_FORMAT_OPTIONS),
             rows=[],
         )
@@ -79,8 +80,8 @@ def mapping_review_detail(
             host_label=host_label_for_job(job),
             refresh_decision_pending=True,
             confirmed_mapping_count=confirmed_mapping_count,
-            mapping_none_option=legacy_ui.MAPPING_NONE_OPTION,
-            mapping_auto_option=legacy_ui.MAPPING_AUTO_OPTION,
+            mapping_none_option=MAPPING_NONE_OPTION,
+            mapping_auto_option=MAPPING_AUTO_OPTION,
             date_format_options=sorted(DATE_FORMAT_OPTIONS),
             rows=[],
         )
@@ -112,8 +113,8 @@ def mapping_review_detail(
         host_label=host_label_for_job(job),
         refresh_decision_pending=False,
         confirmed_mapping_count=confirmed_mapping_count,
-        mapping_none_option=legacy_ui.MAPPING_NONE_OPTION,
-        mapping_auto_option=legacy_ui.MAPPING_AUTO_OPTION,
+        mapping_none_option=MAPPING_NONE_OPTION,
+        mapping_auto_option=MAPPING_AUTO_OPTION,
         date_format_options=sorted(DATE_FORMAT_OPTIONS),
         rows=[
             MappingReviewRowDetailRead(
