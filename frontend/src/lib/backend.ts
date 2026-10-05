@@ -59,7 +59,22 @@ export async function fetchBackendJson<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const response = await fetchBackend(path, init);
+  let response: Response;
+  try {
+    response = await fetchBackend(path, init);
+  } catch (error) {
+    // Preserve Next.js dynamic-rendering signals (cookies()/headers()).
+    if (
+      error instanceof Error &&
+      (error.message.includes("Dynamic server usage") ||
+        error.message.includes("couldn't be rendered statically") ||
+        error.message.includes("used `cookies`"))
+    ) {
+      throw error;
+    }
+    const detail = error instanceof Error ? error.message : "network error";
+    throw new BackendRequestError(`Could not reach the local API (${detail}).`, 503);
+  }
   if (!response.ok) {
     throw new BackendRequestError(await extractErrorMessage(response), response.status);
   }

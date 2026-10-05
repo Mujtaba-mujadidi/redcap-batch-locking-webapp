@@ -57,3 +57,11 @@ def revoke_desktop_job_processing(task_id: str) -> None:
     with _lock:
         _cancelled_task_ids.add(task_id)
         _active_threads.pop(task_id, None)
+
+
+def is_desktop_job_worker_alive(task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    with _lock:
+        thread = _active_threads.get(task_id)
+        return thread is not None and thread.is_alive()

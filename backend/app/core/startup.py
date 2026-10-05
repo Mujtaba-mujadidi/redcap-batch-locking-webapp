@@ -10,6 +10,7 @@ from app.core.desktop import ensure_desktop_session, ensure_desktop_user, is_des
 from app.core.paths import ensure_app_data_dir, resolve_app_data_dir
 from app.core.runtime_paths import alembic_ini_path, backend_root
 from app.db.session import SessionLocal, reconfigure_engine
+from app.services.job_lifecycle import recover_interrupted_active_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ def prepare_desktop_runtime() -> None:
     with SessionLocal() as db:
         ensure_desktop_user(db)
         ensure_desktop_session(db)
+        recovered = recover_interrupted_active_jobs(db)
         db.commit()
+        if recovered:
+            logger.warning("Recovered %s interrupted active job(s) so they can be resumed.", recovered)
 
     logger.info("Desktop runtime prepared.")

@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import get_settings
@@ -20,7 +20,7 @@ from app.core.security import utc_now
 from app.db.session import SessionLocal, get_db_session
 from app.models.audit import AuditEvent
 from app.models.enums import EventLevel, JobStatus, JobType, MappingConfidence, MappingStatus, ReportType, Role, RowAction, RowResultStatus
-from app.models.job import Job, JobEvent, JobRow, Report, RowResult
+from app.models.job import Job, JobRow, Report, RowResult
 from app.models.mapping import InstrumentMapping
 from app.models.redcap import REDCapHost
 from app.models.session import UserSession
@@ -45,6 +45,7 @@ from app.services.redcap_api_keys import (
 from app.services.redcap import (
     RedcapServiceError,
     apply_locking_action,
+    assert_allowed_redcap_api_url,
     canonicalize_redcap_api_url,
     canonicalize_redcap_host_base_url,
     export_record_rows,
@@ -67,7 +68,29 @@ from app.services.users import (
     set_user_active_state,
     set_user_role,
 )
-from app.services.job_queue import enqueue_job_processing, revoke_job_processing
+from app.services.job_queue import enqueue_job_processing, is_job_worker_alive, revoke_job_processing
+from app.services.job_lifecycle import (
+    INTERRUPTED_JOB_MESSAGE,
+    build_job_outcome_copy,
+    build_job_result_stats,
+    find_active_project_job,
+    finalize_job_cancellation,
+    format_row_count,
+    get_job_runtime_state,
+    get_job_worker_task_id,
+    get_retryable_rows,
+    has_shared_redcap_api_key_cache_secret,
+    load_job_rows_for_report,
+    mark_unprocessed_rows_as_cancelled,
+    recalculate_job_rollups,
+    record_job_event,
+    resolve_job_rate_limit,
+    resolve_processing_mode,
+    resolve_retry_processing_mode,
+    set_job_runtime_state,
+    summarize_retry_candidates,
+    upsert_job_report,
+)
 from app.services.job_constants import (
     ACTIVE_JOB_STATUSES,
     JOBS_VISIBLE_STATUSES,
@@ -82,8 +105,8 @@ from app.services.form_complete import (
     fetch_form_complete_snapshot,
     is_form_marked_complete,
     row_uses_repeat_context,
-    select_exported_record_row,
 )
+from app.services.workspace_views import build_job_report_filename
 
 
 settings = get_settings()
@@ -102,7 +125,6 @@ MAX_TEXT_INPUT_LENGTH = 2048
 MAX_API_KEY_LENGTH = 512
 MAX_CSV_CELL_LENGTH = 512
 RECENT_JOBS_LIMIT = 3
-DEFAULT_LIVE_PROCESSING_MAX_ROWS = 5
 QUERY_COLUMN_ALIASES = {
     "record": {"record", "record id", "record / instance"},
     "field": {"field", "field variable", "field name"},
@@ -309,7 +331,7 @@ def _refresh_job_mapping_review(
 
     resolved_rate_limit = set_redcap_rate_limit_for_scope(
         job.redcap_api_url,
-        _resolve_job_rate_limit(job),
+        resolve_job_rate_limit(job),
         job.redcap_project_id,
     )
     with redcap_rate_limit_scope(job.redcap_api_url, job.redcap_project_id):
@@ -407,7 +429,7 @@ def _refresh_job_mapping_review(
             _apply_inferred_mapping_defaults(mapping, review)
         elif mapping.status == MappingStatus.CONFIRMED and _mapping_fields_exist(mapping, field_names):
             if not mapping.form_complete_field_name:
-                mapping.form_complete_field_name = _expected_form_complete_field_name(instrument_name)
+                mapping.form_complete_field_name = expected_form_complete_field_name(instrument_name)
             mapping.last_validated_at = now
         else:
             if mapping.status == MappingStatus.CONFIRMED:
@@ -443,7 +465,7 @@ def _refresh_job_mapping_review(
     job.status = JobStatus.AWAITING_MAPPING_CONFIRMATION if review_instrument_count else JobStatus.READY
     if review_instrument_count == 0:
         job.last_error_summary = None
-    _set_job_runtime_state(
+    set_job_runtime_state(
         job,
         rate_limit_per_minute=resolved_rate_limit,
     )
@@ -652,7 +674,7 @@ def _validate_redcap_api_url(redcap_api_url: str) -> str:
     if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
         raise ValueError("Enter a valid REDCap API URL that starts with http:// or https://.")
 
-    return cleaned_url
+    return assert_allowed_redcap_api_url(cleaned_url)
 
 
 def _validate_redcap_api_key(redcap_api_key: str) -> str:
@@ -908,29 +930,6 @@ def _upsert_redcap_host(db: Session, api_url: str) -> REDCapHost:
     return host
 
 
-def _resolve_job_rate_limit(job: Job) -> int:
-    host_limit = job.redcap_host.rate_limit_per_minute if job.redcap_host is not None else None
-    resolved_limit = host_limit or settings.redcap_rate_limit_per_minute_default
-    return max(1, int(resolved_limit))
-
-
-def _find_active_project_job(db: Session, *, job: Job) -> Job | None:
-    statement = select(Job).where(
-        Job.id != job.id,
-        Job.status.in_(tuple(ACTIVE_JOB_STATUSES)),
-    )
-    if job.redcap_host_id is not None:
-        statement = statement.where(Job.redcap_host_id == job.redcap_host_id)
-    else:
-        statement = statement.where(Job.redcap_api_url == job.redcap_api_url)
-
-    if job.redcap_project_id:
-        statement = statement.where(Job.redcap_project_id == job.redcap_project_id)
-
-    statement = statement.order_by(Job.created_at.asc()).limit(1)
-    return db.scalar(statement)
-
-
 def _mapping_fields_exist(mapping: InstrumentMapping, field_names: set[str]) -> bool:
     for field_name in (mapping.form_complete_field_name, mapping.crf_status_field_name, mapping.lock_date_field_name):
         if field_name and field_name not in field_names:
@@ -938,14 +937,10 @@ def _mapping_fields_exist(mapping: InstrumentMapping, field_names: set[str]) -> 
     return True
 
 
-def _expected_form_complete_field_name(instrument_name: str) -> str:
-    return expected_form_complete_field_name(instrument_name)
-
-
 def _apply_inferred_mapping_defaults(mapping: InstrumentMapping, review: dict[str, object]) -> None:
     selected_status = review.get("selected_status_candidate") or {}
     selected_date = review.get("selected_date_candidate") or {}
-    mapping.form_complete_field_name = _expected_form_complete_field_name(mapping.instrument_name)
+    mapping.form_complete_field_name = expected_form_complete_field_name(mapping.instrument_name)
     mapping.crf_status_field_name = selected_status.get("field_name")
     mapping.lock_date_field_name = selected_date.get("field_name")
     mapping.status = MappingStatus.INFERRED
@@ -1148,286 +1143,10 @@ def _get_review_instruments(job: Job) -> list[str]:
     ]
 
 
-def _format_row_count(count: int) -> str:
-    return f"{count} row{'s' if count != 1 else ''}"
-
-
-def _resolve_live_processing_max_rows() -> int:
-    return max(int(getattr(settings, "live_processing_max_rows", DEFAULT_LIVE_PROCESSING_MAX_ROWS) or 0), 0)
-
-
-def _resolve_processing_mode(*, row_count: int) -> str:
-    live_processing_max_rows = _resolve_live_processing_max_rows()
-    if live_processing_max_rows > 0 and 0 < row_count <= live_processing_max_rows:
-        return "live"
-    return "background"
-
-
-def _resolve_retry_processing_mode(*, job: Job, row_count: int) -> str:
-    runtime_mode = str(_get_job_runtime_state(job).get("mode") or "").strip()
-    if runtime_mode in {"live", "background"}:
-        return runtime_mode
-    return _resolve_processing_mode(row_count=row_count)
-
-
-def _has_shared_redcap_api_key_cache_secret() -> bool:
-    return bool((settings.redcap_api_key_cache_secret or "").strip())
-
-
-def _processing_mode_runtime_phrase(processing_mode: str) -> str:
-    return "live in this browser session" if processing_mode == "live" else "in the background"
-
-
-def _processing_mode_action_label(processing_mode: str) -> str:
-    return "live processing" if processing_mode == "live" else "background processing"
-
-
-def _processing_mode_title(processing_mode: str) -> str:
-    return "Live" if processing_mode == "live" else "Background"
-
-
-def _get_retryable_rows(db: Session, *, job_id: UUID) -> list[JobRow]:
-    return list(
-        db.scalars(
-            select(JobRow)
-            .options(selectinload(JobRow.row_result))
-            .outerjoin(RowResult, RowResult.job_row_id == JobRow.id)
-            .where(JobRow.job_id == job_id)
-            .where(
-                or_(
-                    RowResult.id.is_(None),
-                    RowResult.status == RowResultStatus.FAILED,
-                    RowResult.status == RowResultStatus.CANCELLED,
-                    and_(
-                        RowResult.status == RowResultStatus.PENDING,
-                        RowResult.processed_at.is_(None),
-                    ),
-                )
-            )
-            .order_by(JobRow.row_number)
-        ).all()
-    )
-
-
-def _summarize_retry_candidates(rows: list[JobRow]) -> dict[str, object]:
-    failed_count = 0
-    unprocessed_count = 0
-
-    for row in rows:
-        row_result = row.row_result
-        if row_result is not None and row_result.status == RowResultStatus.FAILED:
-            failed_count += 1
-        else:
-            unprocessed_count += 1
-
-    if unprocessed_count > 0:
-        selection_copy = (
-            f"{_format_row_count(failed_count)} that failed and {_format_row_count(unprocessed_count)} that were not processed yet"
-            if failed_count > 0
-            else f"{_format_row_count(unprocessed_count)} that were not processed yet"
-        )
-        return {
-            "count": len(rows),
-            "failed_count": failed_count,
-            "unprocessed_count": unprocessed_count,
-            "retry_scope": "remaining_rows",
-            "action_label": "Retry Remaining Rows",
-            "selection_copy": selection_copy,
-            "progress_summary": "remaining rows",
-        }
-
-    return {
-        "count": len(rows),
-        "failed_count": failed_count,
-        "unprocessed_count": 0,
-        "retry_scope": "failed_only",
-        "action_label": "Retry Failed Rows",
-        "selection_copy": f"{_format_row_count(failed_count)} that failed",
-        "progress_summary": "failed rows",
-    }
-
-
-def _mark_unprocessed_rows_as_cancelled(
-    db: Session,
-    *,
-    job_id: UUID,
-    reason: str,
-    message: str = "Row was not processed because the background run stopped early.",
-) -> int:
-    rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job_id).order_by(JobRow.row_number)).all())
-    cancelled_count = 0
-
-    for row in rows:
-        row_result = row.row_result
-        if row_result is not None and row_result.processed_at is not None:
-            continue
-
-        if row_result is None:
-            row_result = RowResult(job_row_id=row.id)
-            db.add(row_result)
-
-        row_result.status = RowResultStatus.CANCELLED
-        row_result.outcome_code = "not_processed"
-        row_result.message = message
-        row_result.redcap_http_status = None
-        row_result.query_blocking_count = None
-        row_result.details_json = {
-            "job_failure_reason": reason,
-            "processing_steps": [
-                message,
-            ],
-        }
-        row_result.duration_ms = None
-        row_result.processed_at = None
-        cancelled_count += 1
-
-    return cancelled_count
-
-
-def _build_job_outcome_copy(job: Job) -> str:
-    unprocessed_rows = max((job.total_rows or 0) - (job.processed_rows or 0), 0)
-
-    if job.status == JobStatus.COMPLETED:
-        if job.ignored_rows and not job.locked_rows and not job.unlocked_rows:
-            verb = "was" if job.ignored_rows == 1 else "were"
-            return f"No lock changes were applied. {_format_row_count(job.ignored_rows).capitalize()} {verb} skipped."
-        if job.ignored_rows:
-            verb = "was" if job.ignored_rows == 1 else "were"
-            return (
-                f"Completed with changes. {_format_row_count(job.ignored_rows).capitalize()} {verb} skipped."
-            )
-        return "Completed successfully."
-
-    if job.failed_rows == 0 and job.blocked_rows > 0:
-        return job.last_error_summary or (
-            f"{_format_row_count(job.blocked_rows).capitalize()} could not run because REDCap reported that the target "
-            "form has no existing data yet."
-        )
-
-    parts: list[str] = []
-    if job.failed_rows:
-        parts.append(f"{_format_row_count(job.failed_rows).capitalize()} failed.")
-    if job.blocked_rows:
-        verb = "was" if job.blocked_rows == 1 else "were"
-        parts.append(f"{_format_row_count(job.blocked_rows).capitalize()} {verb} blocked.")
-    if unprocessed_rows:
-        verb = "was" if unprocessed_rows == 1 else "were"
-        parts.append(f"{_format_row_count(unprocessed_rows).capitalize()} {verb} not processed after the run stopped early.")
-    if job.last_error_summary:
-        parts.append(job.last_error_summary)
-
-    return " ".join(parts) if parts else "Processing failed."
-
-
-def _build_job_result_stats(job: Job) -> list[str]:
-    if job.status not in REPORTABLE_JOB_STATUSES and job.processed_rows <= 0:
-        return []
-
-    stats: list[str] = []
-    if job.locked_rows:
-        stats.append(f"{job.locked_rows} locked")
-    if job.unlocked_rows:
-        stats.append(f"{job.unlocked_rows} unlocked")
-    if job.ignored_rows:
-        stats.append(f"{job.ignored_rows} skipped")
-    if job.blocked_rows:
-        stats.append(f"{job.blocked_rows} blocked")
-    if job.failed_rows:
-        stats.append(f"{job.failed_rows} failed")
-
-    unprocessed_rows = max((job.total_rows or 0) - (job.processed_rows or 0), 0)
-    if unprocessed_rows:
-        stats.append(f"{unprocessed_rows} not processed")
-
-    return stats
-
-
 def _build_job_scope_filter(current_user: User):
     if current_user.role in (Role.ADMIN, Role.SUPER_ADMIN):
         return None
     return Job.owner_id == current_user.id
-
-
-def _get_job_runtime_state(job: Job) -> dict[str, object]:
-    options = job.options_json if isinstance(job.options_json, dict) else {}
-    runtime_state = options.get("runtime")
-    return runtime_state if isinstance(runtime_state, dict) else {}
-
-
-def _set_job_runtime_state(job: Job, **updates: object) -> None:
-    options = dict(job.options_json) if isinstance(job.options_json, dict) else {}
-    runtime_state = dict(options.get("runtime") or {})
-    runtime_state.update(updates)
-    options["runtime"] = runtime_state
-    job.options_json = options
-
-
-def _get_job_worker_task_id(job: Job) -> str | None:
-    runtime_state = _get_job_runtime_state(job)
-    task_id = str(runtime_state.get("worker_task_id") or "").strip()
-    return task_id or None
-
-
-def _finalize_job_cancellation(
-    db: Session,
-    *,
-    job: Job,
-    previous_status: JobStatus,
-    cancellation_message: str,
-    row_message: str,
-    event_message: str,
-    actor_user_id: UUID | None = None,
-    processing_mode: str | None = None,
-    request: Request | None = None,
-) -> int:
-    cancelled_count = _mark_unprocessed_rows_as_cancelled(
-        db,
-        job_id=job.id,
-        reason=cancellation_message,
-        message=row_message,
-    )
-    _recalculate_job_rollups(db, job=job)
-    job.status = JobStatus.CANCELLED
-    job.cancellation_requested_at = job.cancellation_requested_at or utc_now()
-    job.completed_at = utc_now()
-    job.last_error_summary = cancellation_message
-    resolved_mode = str(_get_job_runtime_state(job).get("mode") or processing_mode or "background").strip() or "background"
-    _set_job_runtime_state(
-        job,
-        mode=resolved_mode,
-        phase="cancelled",
-        latest_message=cancellation_message,
-        rate_limit_wait_until=None,
-    )
-    _record_job_event(
-        db,
-        job=job,
-        event_type="job.cancelled",
-        message=event_message,
-        status_from=previous_status,
-        status_to=JobStatus.CANCELLED,
-        payload_json={
-            "cancelled_rows": cancelled_count,
-            "processing_mode": resolved_mode,
-        },
-    )
-    rows = _load_job_rows_for_report(db, job_id=job.id)
-    _upsert_job_report(db, job=job, rows=rows)
-    if actor_user_id is not None:
-        record_audit_event(
-            db,
-            actor_user_id=actor_user_id,
-            action="jobs.cancel",
-            object_type="job",
-            object_id=str(job.id),
-            request=request,
-            metadata={
-                "previous_status": previous_status.value,
-                "cancelled_rows": cancelled_count,
-                "processing_mode": resolved_mode,
-            },
-        )
-    return cancelled_count
 
 
 def _parse_runtime_timestamp(value: object) -> datetime | None:
@@ -1439,14 +1158,48 @@ def _parse_runtime_timestamp(value: object) -> datetime | None:
         return None
 
 
+def _neutralize_processing_copy(text: str) -> str:
+    """Rewrite legacy live/background wording for desktop UI copy."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+
+    replacements = (
+        ("in the background for this REDCap project", "for this REDCap project"),
+        ("in the background", ""),
+        ("for background processing", "for processing"),
+        ("background processing", "processing"),
+        ("Background processing", "Processing"),
+        ("background worker", "processor"),
+        ("Background worker", "Processor"),
+        ("Starting background processing", "Starting processing"),
+        ("live in this browser session for this REDCap project", "for this REDCap project"),
+        ("live in this browser session", ""),
+        ("Live in this browser session", ""),
+        ("live processing", "processing"),
+        ("Live processing", "Processing"),
+        ("Finished live processing", "Finished processing"),
+        ("Mode: Live in this browser session.", ""),
+        ("Mode: Background.", ""),
+    )
+    for old, new in replacements:
+        cleaned = cleaned.replace(old, new)
+
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .")
+    if cleaned and not cleaned.endswith((".", "!", "?")):
+        # Keep terse status lines readable without forcing punctuation on every fragment.
+        pass
+    return cleaned.strip()
+
+
 def _summarize_job_progress(job: Job) -> dict[str, object]:
-    runtime_state = _get_job_runtime_state(job)
+    runtime_state = get_job_runtime_state(job)
     total_rows = max(int(runtime_state.get("active_row_count") or job.total_rows or 0), 0)
     processed_rows = max(job.processed_rows, 0)
     progress_percent = int((processed_rows / total_rows) * 100) if total_rows else 0
-    latest_message = str(runtime_state.get("latest_message") or "").strip()
+    latest_message = _neutralize_processing_copy(str(runtime_state.get("latest_message") or ""))
     processing_mode = str(runtime_state.get("mode") or "live").strip() or "live"
-    resolved_rate_limit = int(runtime_state.get("rate_limit_per_minute") or _resolve_job_rate_limit(job))
+    resolved_rate_limit = int(runtime_state.get("rate_limit_per_minute") or resolve_job_rate_limit(job))
     retry_scope = str(runtime_state.get("retry_scope") or "").strip()
     wait_until = _parse_runtime_timestamp(runtime_state.get("rate_limit_wait_until"))
     wait_seconds_remaining: int | None = None
@@ -1458,22 +1211,22 @@ def _summarize_job_progress(job: Job) -> dict[str, object]:
                 f"Rate limit reached for this REDCap project. Resuming in about {wait_seconds_remaining} seconds."
             )
 
-    if job.status == JobStatus.QUEUED and not latest_message:
-        latest_message = (
-            "Queued to start in the background."
-            if processing_mode == "background"
-            else "Preparing to start live processing in this browser session."
-        )
-    elif job.status == JobStatus.RUNNING and not latest_message:
-        latest_message = (
-            "Processing rows in the background."
-            if processing_mode == "background"
-            else "Processing rows live in this browser session."
-        )
-    elif job.status == JobStatus.CANCEL_REQUESTED and not latest_message:
-        latest_message = "Cancellation requested. Waiting for the current step to finish before stopping this job."
-    elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT and not latest_message:
-        latest_message = "Paused because the REDCap API rate limit was reached."
+    # Replace emptied or still mode-heavy legacy messages with status defaults.
+    if (
+        not latest_message
+        or "background" in latest_message.lower()
+        or "browser session" in latest_message.lower()
+    ):
+        if job.status == JobStatus.QUEUED:
+            latest_message = "Queued to start. Keep the app open until processing finishes."
+        elif job.status == JobStatus.RUNNING:
+            latest_message = "Processing rows. Keep the app open until this finishes."
+        elif job.status == JobStatus.CANCEL_REQUESTED:
+            latest_message = "Cancellation requested. Waiting for the current step to finish before stopping this job."
+        elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT:
+            latest_message = "Paused because the REDCap API rate limit was reached."
+        else:
+            latest_message = latest_message
 
     summary_copy = f"{processed_rows} of {total_rows} rows processed" if total_rows else "No rows queued"
     if retry_scope == "failed_only":
@@ -1505,39 +1258,6 @@ def _summarize_job_progress(job: Job) -> dict[str, object]:
         "rate_limit_per_minute": resolved_rate_limit,
         "retry_scope": retry_scope,
     }
-def _recalculate_job_rollups(db: Session, *, job: Job) -> None:
-    rows = list(db.scalars(select(JobRow).where(JobRow.job_id == job.id).order_by(JobRow.row_number)).all())
-    processed_rows = 0
-    locked_rows = 0
-    unlocked_rows = 0
-    ignored_rows = 0
-    blocked_rows = 0
-    failed_rows = 0
-
-    for row in rows:
-        row_result = row.row_result
-        if row_result is None:
-            continue
-        if row_result.processed_at is not None:
-            processed_rows += 1
-        if row_result.status == RowResultStatus.SUCCESS:
-            if row_result.outcome_code == "locked":
-                locked_rows += 1
-            elif row_result.outcome_code == "unlocked":
-                unlocked_rows += 1
-        elif row_result.status == RowResultStatus.IGNORED:
-            ignored_rows += 1
-        elif row_result.status == RowResultStatus.BLOCKED:
-            blocked_rows += 1
-        elif row_result.status == RowResultStatus.FAILED:
-            failed_rows += 1
-
-    job.processed_rows = processed_rows
-    job.locked_rows = locked_rows
-    job.unlocked_rows = unlocked_rows
-    job.ignored_rows = ignored_rows
-    job.blocked_rows = blocked_rows
-    job.failed_rows = failed_rows
 
 
 def _list_visible_jobs(
@@ -1579,13 +1299,6 @@ def _get_job_report_map(db: Session, jobs: list[Job]) -> dict[UUID, Report]:
     return report_map
 
 
-def _build_job_report_filename(job: Job) -> str:
-    source_name = job.request_file_name or f"job-{job.id}"
-    sanitized_name = _sanitize_filename(source_name, label="job request")
-    stem = Path(sanitized_name).stem or f"job-{job.id}"
-    return f"{stem}-report.csv"
-
-
 def _serialize_report_cell(value: object) -> str:
     if value is None:
         return ""
@@ -1594,11 +1307,27 @@ def _serialize_report_cell(value: object) -> str:
     return str(value)
 
 
-def _serialize_processing_steps(details: dict[str, object]) -> str:
-    raw_steps = details.get("processing_steps")
-    if not isinstance(raw_steps, list):
+def _summarize_form_complete_export_rows(export_rows: object) -> str:
+    """Compact human-readable summary for internal processing steps."""
+    if not isinstance(export_rows, list) or not export_rows:
         return ""
-    return " | ".join(str(step) for step in raw_steps if str(step).strip())
+
+    instance_labels: list[str] = []
+    for row in export_rows:
+        if not isinstance(row, dict):
+            continue
+        instrument = str(row.get("redcap_repeat_instrument") or "").strip()
+        instance = str(row.get("redcap_repeat_instance") or "").strip()
+        if instrument or instance:
+            instance_labels.append(f"{instrument or '-'}#{instance or '-'}")
+        else:
+            instance_labels.append("parent")
+
+    unique_labels = list(dict.fromkeys(instance_labels))
+    preview = ", ".join(unique_labels[:8])
+    if len(unique_labels) > 8:
+        preview = f"{preview}, +{len(unique_labels) - 8} more"
+    return f"{len(export_rows)} REDCap export row(s)" + (f" [{preview}]" if preview else "")
 
 
 def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
@@ -1624,8 +1353,6 @@ def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
             "Action Called",
             "Locked By",
             "Locked At",
-            "Status Before",
-            "Status After",
         ]
     )
 
@@ -1652,52 +1379,10 @@ def _build_job_report_csv(job: Job, rows: list[JobRow]) -> bytes:
                 _serialize_report_cell(details.get("action_called")),
                 _serialize_report_cell(details.get("locked_by")),
                 _serialize_report_cell(details.get("locked_at")),
-                _serialize_report_cell(details.get("status_before")),
-                _serialize_report_cell(details.get("status_after")),
             ]
         )
 
     return output.getvalue().encode("utf-8")
-
-
-def _load_job_rows_for_report(db: Session, *, job_id: UUID) -> list[JobRow]:
-    return list(
-        db.scalars(
-            select(JobRow)
-            .options(selectinload(JobRow.row_result))
-            .where(JobRow.job_id == job_id)
-            .order_by(JobRow.row_number)
-        ).all()
-    )
-
-
-def _upsert_job_report(db: Session, *, job: Job, rows: list[JobRow]) -> Report:
-    report = db.scalar(
-        select(Report).where(
-            Report.job_id == job.id,
-            Report.report_type == ReportType.CSV,
-        )
-    )
-    report_bytes = _build_job_report_csv(job, rows)
-    checksum = hashlib.sha256(report_bytes).hexdigest()
-    file_name = _build_job_report_filename(job)
-
-    if report is None:
-        report = Report(
-            job_id=job.id,
-            report_type=ReportType.CSV,
-            storage_path=f"generated://job/{job.id}/{file_name}",
-            file_name=file_name,
-            content_type="text/csv",
-        )
-        db.add(report)
-
-    report.file_name = file_name
-    report.content_type = "text/csv"
-    report.storage_path = f"generated://job/{job.id}/{file_name}"
-    report.byte_size = len(report_bytes)
-    report.checksum_sha256 = checksum
-    return report
 
 
 def _ensure_report_record(db: Session, *, job: Job) -> Report:
@@ -1707,7 +1392,7 @@ def _ensure_report_record(db: Session, *, job: Job) -> Report:
             Report.report_type == ReportType.CSV,
         )
     )
-    file_name = _build_job_report_filename(job)
+    file_name = build_job_report_filename(job)
     if report is None:
         report = Report(
             job_id=job.id,
@@ -1806,49 +1491,39 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             cancel_label = "Cancel Job"
             remap_label = "Refresh options"
         elif job.status == JobStatus.READY:
-            launch_mode = _resolve_processing_mode(row_count=job.total_rows or 0)
+            launch_mode = resolve_processing_mode(row_count=job.total_rows or 0)
             if has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
                 action_label = "Process"
                 action_kind = "process_cached"
                 action_hint = (
-                    "Starts live processing in this browser session for this REDCap project using the saved API key. "
-                    if launch_mode == "live"
-                    else "Starts background processing for this REDCap project using the saved API key. "
-                ) + (
-                    f"{progress['rate_limit_copy']}"
+                    "Starts processing for this REDCap project using the saved API key. "
+                    f"Keep the app open until it finishes. {progress['rate_limit_copy']}"
                 )
             else:
                 action_label = "Process"
                 action_kind = "process"
                 action_hint = (
-                    "Enter the REDCap API key to start live processing in this browser session for this REDCap project. "
-                    if launch_mode == "live"
-                    else "Enter the REDCap API key to start background processing for this REDCap project. "
-                ) + (
-                    f"{progress['rate_limit_copy']}"
+                    "Enter the REDCap API key to start processing for this REDCap project. "
+                    f"Keep the app open until it finishes. {progress['rate_limit_copy']}"
                 )
             status_tone = "status-active"
             cancel_label = "Cancel Job"
         elif job.status == JobStatus.QUEUED:
-            active_mode = str(progress["mode"])
             action_hint = (
-                f"Queued {_processing_mode_runtime_phrase(active_mode)} for this REDCap project. {progress['rate_limit_copy']}"
+                f"Queued for this REDCap project. Keep the app open until processing finishes. {progress['rate_limit_copy']}"
             )
             status_tone = "status-review"
             cancel_label = "Cancel Job"
         elif job.status == JobStatus.RUNNING:
-            active_mode = str(progress["mode"])
             action_hint = (
-                f"This job is currently being processed {_processing_mode_runtime_phrase(active_mode)}. "
+                "This job is currently processing. Keep the app open until it finishes. "
                 f"{progress['rate_limit_copy']}"
             )
             status_tone = "status-review"
             cancel_label = "Cancel Job"
         elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT:
-            active_mode = str(progress["mode"])
             action_hint = progress["wait_message"] or (
-                "Waiting for the REDCap API rate-limit window to reopen before "
-                f"{_processing_mode_action_label(active_mode)} continues."
+                "Waiting for the REDCap API rate-limit window to reopen before processing continues."
             )
             status_tone = "status-review"
             cancel_label = "Cancel Job"
@@ -1856,31 +1531,32 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             action_hint = progress["message"] or "Cancellation requested. Waiting for the current step to finish."
             status_tone = "status-review"
         elif job.status == JobStatus.CANCELLED:
-            retry_rows = _get_retryable_rows(db, job_id=job.id)
-            retry_summary = _summarize_retry_candidates(retry_rows)
-            retry_launch_mode = _resolve_retry_processing_mode(job=job, row_count=int(retry_summary["count"]))
+            retry_rows = get_retryable_rows(db, job_id=job.id)
+            retry_summary = summarize_retry_candidates(retry_rows)
+            retry_launch_mode = resolve_retry_processing_mode(job=job, row_count=int(retry_summary["count"]))
             launch_mode = retry_launch_mode if retry_summary["count"] else None
+            resume_label = str(retry_summary["action_label"])
             if retry_summary["count"] and has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
-                action_label = "Re-process"
+                action_label = resume_label
                 action_kind = "process_cached"
                 action_hint = (
-                    f"{job.last_error_summary or 'Processing was cancelled.'} "
-                    f"Re-process will continue with {retry_summary['selection_copy']} "
-                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} using the saved API key."
+                    f"{job.last_error_summary or 'Processing was stopped.'} "
+                    f"{resume_label} will continue with {retry_summary['selection_copy']} using the saved API key. "
+                    "Keep the app open until it finishes."
                 )
             elif retry_summary["count"]:
-                action_label = "Re-process"
+                action_label = resume_label
                 action_kind = "process"
                 action_hint = (
-                    f"{job.last_error_summary or 'Processing was cancelled.'} "
-                    f"Re-process will continue with {retry_summary['selection_copy']} "
-                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} once you enter the API key."
+                    f"{job.last_error_summary or 'Processing was stopped.'} "
+                    f"{resume_label} will continue with {retry_summary['selection_copy']} once you enter the API key. "
+                    "Keep the app open until it finishes."
                 )
             elif report is not None:
                 action_href = f"/reports/{report.id}/download"
                 action_label = "Export Report"
                 action_kind = "download"
-                action_hint = _build_job_outcome_copy(job)
+                action_hint = build_job_outcome_copy(job)
             else:
                 action_hint = job.last_error_summary or "Cancelled before processing started."
             status_tone = "status-inactive"
@@ -1888,34 +1564,34 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
             action_href = f"/reports/{report.id}/download" if report is not None else None
             action_label = "Export Report" if report is not None else None
             action_kind = "download" if report is not None else None
-            action_hint = _build_job_outcome_copy(job)
+            action_hint = build_job_outcome_copy(job)
             status_tone = "status-active"
         elif job.status in {JobStatus.COMPLETED_WITH_ERRORS, JobStatus.FAILED}:
-            retry_rows = _get_retryable_rows(db, job_id=job.id)
-            retry_summary = _summarize_retry_candidates(retry_rows)
-            retry_launch_mode = _resolve_retry_processing_mode(job=job, row_count=int(retry_summary["count"]))
+            retry_rows = get_retryable_rows(db, job_id=job.id)
+            retry_summary = summarize_retry_candidates(retry_rows)
+            retry_launch_mode = resolve_retry_processing_mode(job=job, row_count=int(retry_summary["count"]))
             launch_mode = retry_launch_mode if retry_summary["count"] else None
             if retry_summary["count"] and has_cached_redcap_api_key(db, user_session_id=user_session_id, redcap_host_id=job.redcap_host_id):
                 action_label = str(retry_summary["action_label"])
                 action_kind = "process_cached"
                 action_hint = (
-                    f"{_build_job_outcome_copy(job)} Retry will process {retry_summary['selection_copy']} only "
-                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} with the saved API key."
+                    f"{build_job_outcome_copy(job)} {action_label} will process {retry_summary['selection_copy']} only "
+                    "with the saved API key. Keep the app open until it finishes."
                 )
             elif retry_summary["count"]:
                 action_label = str(retry_summary["action_label"])
                 action_kind = "process"
                 action_hint = (
-                    f"{_build_job_outcome_copy(job)} Retry will process {retry_summary['selection_copy']} only "
-                    f"{_processing_mode_runtime_phrase(retry_launch_mode)} once you enter the API key."
+                    f"{build_job_outcome_copy(job)} {action_label} will process {retry_summary['selection_copy']} only "
+                    "once you enter the API key. Keep the app open until it finishes."
                 )
             elif report is not None:
                 action_href = f"/reports/{report.id}/download"
                 action_label = "Export Report"
                 action_kind = "download"
-                action_hint = _build_job_outcome_copy(job)
+                action_hint = build_job_outcome_copy(job)
             else:
-                action_hint = _build_job_outcome_copy(job)
+                action_hint = build_job_outcome_copy(job)
             status_tone = "status-inactive"
         else:
             action_hint = "Processing failed."
@@ -1927,13 +1603,13 @@ def _build_job_review_rows(jobs: list[Job], *, db: Session, user_session_id: UUI
                 "host_label": host_label,
                 "review_instruments": review_instruments,
                 "review_count": len(review_instruments),
-                "result_stats": _build_job_result_stats(job),
+                "result_stats": build_job_result_stats(job),
                 "status_label": status_label,
                 "status_tone": status_tone,
                 "action_href": action_href,
                 "action_label": action_label,
                 "action_kind": action_kind,
-                "action_hint": action_hint,
+                "action_hint": _neutralize_processing_copy(str(action_hint or "")),
                 "cancel_label": cancel_label,
                 "continue_label": continue_label,
                 "remap_label": remap_label,
@@ -1972,13 +1648,6 @@ def _normalize_query_match_counts(raw_value: object) -> dict[int, int]:
             query_match_counts[normalized_row_number] = normalized_count
     return query_match_counts
 
-
-# Thin aliases so existing call sites in this module keep working while the
-# real implementations live in app.services.form_complete.
-_row_uses_repeat_context = row_uses_repeat_context
-_select_exported_record_row = select_exported_record_row
-_is_form_marked_complete = is_form_marked_complete
-_fetch_form_complete_snapshot = fetch_form_complete_snapshot
 
 
 def _format_redcap_temporal_value(
@@ -2023,7 +1692,7 @@ def _build_shadow_field_payload(
     payload: dict[str, object] = {record_id_field_name: row.record_id}
     if is_longitudinal and row.event_name:
         payload["redcap_event_name"] = row.event_name
-    if _row_uses_repeat_context(row, repeating_forms_events=repeating_forms_events):
+    if row_uses_repeat_context(row, repeating_forms_events=repeating_forms_events):
         payload["redcap_repeat_instrument"] = row.target_instrument
         payload["redcap_repeat_instance"] = row.repeat_instance
 
@@ -2089,32 +1758,6 @@ def _extract_shadow_import_date_format(mapping: InstrumentMapping | None) -> str
 
     date_format = str(date_config.get("date_format") or "").strip().upper()
     return date_format or None
-
-
-def _record_job_event(
-    db: Session,
-    *,
-    job: Job,
-    event_type: str,
-    level: EventLevel = EventLevel.INFO,
-    message: str | None = None,
-    job_row_id: UUID | None = None,
-    payload_json: dict[str, object] | None = None,
-    status_from: JobStatus | None = None,
-    status_to: JobStatus | None = None,
-) -> None:
-    db.add(
-        JobEvent(
-            job_id=job.id,
-            job_row_id=job_row_id,
-            level=level,
-            event_type=event_type,
-            status_from=status_from,
-            status_to=status_to,
-            message=message,
-            payload_json=payload_json,
-        )
-    )
 
 
 def _status_state_is_ambiguous(*, lock_state: str, locked_by: str | None, locked_at: str | None) -> bool:
@@ -2320,8 +1963,28 @@ def import_jobs_request_file(
         return RedirectResponse("/login", status_code=303)
 
     submitted_api_url = str(redcap_api_url or "").strip()[:MAX_TEXT_INPUT_LENGTH]
+
+    # Phase 1: validate API URL against the approved Oxford Vaccine Group allowlist
+    # before any REDCap network request is made.
     try:
-        cleaned_api_url = canonicalize_redcap_api_url(_validate_redcap_api_url(redcap_api_url))
+        cleaned_api_url = _validate_redcap_api_url(redcap_api_url)
+    except ValueError as exc:
+        record_audit_event(
+            db,
+            actor_user_id=session.user.id,
+            action="jobs.import_request_failed",
+            object_type="job_request_import",
+            request=request,
+            metadata={"reason": str(exc), "phase": "api_url_allowlist"},
+        )
+        db.commit()
+        return _build_jobs_redirect(
+            open_import=True,
+            import_error=str(exc),
+            import_api_url=submitted_api_url,
+        )
+
+    try:
         cleaned_api_key = _validate_redcap_api_key(redcap_api_key)
     except ValueError as exc:
         record_audit_event(
@@ -2330,7 +1993,7 @@ def import_jobs_request_file(
             action="jobs.import_request_failed",
             object_type="job_request_import",
             request=request,
-            metadata={"reason": str(exc)},
+            metadata={"reason": str(exc), "phase": "api_key"},
         )
         db.commit()
         return _build_jobs_redirect(
@@ -2501,7 +2164,7 @@ def import_jobs_request_file(
             _apply_inferred_mapping_defaults(mapping, review)
         elif mapping.status == MappingStatus.CONFIRMED and _mapping_fields_exist(mapping, field_names):
             if not mapping.form_complete_field_name:
-                mapping.form_complete_field_name = _expected_form_complete_field_name(instrument_name)
+                mapping.form_complete_field_name = expected_form_complete_field_name(instrument_name)
             mapping.last_validated_at = now
             reused_confirmed_mapping_instruments.append(instrument_name)
         else:
@@ -2643,20 +2306,21 @@ def run_job_processing(
             db.refresh(job, attribute_names=["status", "cancellation_requested_at"])
             if job.status != JobStatus.CANCEL_REQUESTED:
                 return False
-            _finalize_job_cancellation(
+            finalize_job_cancellation(
                 db,
                 job=job,
                 previous_status=JobStatus.CANCEL_REQUESTED,
                 cancellation_message=cancellation_message,
-                row_message="Row was not processed because the job was cancelled during background processing.",
-                event_message="Cancelled during background processing. Remaining rows were marked as not processed.",
+                row_message="Row was not processed because the job was cancelled during processing.",
+                event_message="Cancelled during processing. Remaining rows were marked as not processed.",
+                build_report_csv=_build_job_report_csv,
                 actor_user_id=actor_user_id,
                 processing_mode=processing_mode,
             )
             db.commit()
             return True
 
-        if cancel_if_requested("Job was cancelled before background processing started."):
+        if cancel_if_requested("Job was cancelled before processing started."):
             return
         cleaned_api_key = api_key.strip()
         if not cleaned_api_key and user_session_id is not None and job.redcap_host_id is not None:
@@ -2668,18 +2332,18 @@ def run_job_processing(
             if cached_api_key:
                 cleaned_api_key = cached_api_key
         if not cleaned_api_key:
-            if processing_mode == "background" and not _has_shared_redcap_api_key_cache_secret():
+            if processing_mode == "background" and not has_shared_redcap_api_key_cache_secret():
                 raise ValueError(
-                    "Background processing requires REDCAP_API_KEY_CACHE_SECRET to be configured with the same value "
-                    "for the API and worker services before the encrypted REDCap API key cache can be reused."
+                    "Processing requires REDCAP_API_KEY_CACHE_SECRET to be configured before the encrypted "
+                    "REDCap API key cache can be reused."
                 )
             raise ValueError(
-                "A valid REDCap API key was not available for this background job. Please start the job again from the Jobs page."
+                "A valid REDCap API key was not available for this job. Please start the job again from the Jobs page."
             )
 
         resolved_rate_limit = set_redcap_rate_limit_for_scope(
             job.redcap_api_url,
-            _resolve_job_rate_limit(job),
+            resolve_job_rate_limit(job),
             job.redcap_project_id,
         )
 
@@ -2689,18 +2353,18 @@ def run_job_processing(
                 wait_until = utc_now().timestamp() + wait_seconds
                 previous_status = job.status
                 job.status = JobStatus.WAITING_DUE_TO_RATE_LIMIT
-                _set_job_runtime_state(
+                set_job_runtime_state(
                     job,
                     mode=processing_mode,
                     phase="rate_limited",
                     latest_message=(
                         f"Paused after reaching the REDCap API limit of {int(payload.get('rate_limit_per_minute') or resolved_rate_limit)} "
-                        f"calls per minute for this REDCap project during {_processing_mode_action_label(processing_mode)}."
+                        "calls per minute for this REDCap project."
                     ),
                     rate_limit_wait_until=datetime.fromtimestamp(wait_until, tz=utc_now().tzinfo).isoformat(),
                     rate_limit_per_minute=int(payload.get("rate_limit_per_minute") or resolved_rate_limit),
                 )
-                _record_job_event(
+                record_job_event(
                     db,
                     job=job,
                     event_type="job.rate_limit_wait_started",
@@ -2719,19 +2383,19 @@ def run_job_processing(
                     return
                 previous_status = job.status
                 job.status = JobStatus.RUNNING
-                _set_job_runtime_state(
+                set_job_runtime_state(
                     job,
                     mode=processing_mode,
                     phase="processing_rows",
-                    latest_message=f"Rate-limit window reopened. Resuming {_processing_mode_action_label(processing_mode)}.",
+                    latest_message="Rate-limit window reopened. Resuming processing.",
                     rate_limit_wait_until=None,
                     rate_limit_per_minute=int(payload.get("rate_limit_per_minute") or resolved_rate_limit),
                 )
-                _record_job_event(
+                record_job_event(
                     db,
                     job=job,
                     event_type="job.rate_limit_wait_finished",
-                    message=f"Rate-limit window reopened. {_processing_mode_title(processing_mode)} processing resumed.",
+                    message="Rate-limit window reopened. Processing resumed.",
                     status_from=previous_status,
                     status_to=JobStatus.RUNNING,
                 )
@@ -2755,21 +2419,21 @@ def run_job_processing(
         retry_unprocessed_count = 0
         if retry_row_ids:
             retry_rows = list(db.scalars(select(JobRow).where(JobRow.id.in_(retry_row_ids)).order_by(JobRow.row_number)).all())
-            retry_summary = _summarize_retry_candidates(retry_rows)
+            retry_summary = summarize_retry_candidates(retry_rows)
             retry_scope = str(retry_summary["retry_scope"])
             active_row_count = int(retry_summary["count"])
             retry_failed_count = int(retry_summary["failed_count"])
             retry_unprocessed_count = int(retry_summary["unprocessed_count"])
-        _set_job_runtime_state(
+        set_job_runtime_state(
             job,
             mode=processing_mode,
             phase="preflight",
             latest_message=(
-                f"Checking REDCap access and loading project details before retrying remaining rows {_processing_mode_runtime_phrase(processing_mode)}."
+                "Checking REDCap access and loading project details before resuming remaining rows."
                 if retry_scope == "remaining_rows"
-                else f"Checking REDCap access and loading project details before retrying failed rows {_processing_mode_runtime_phrase(processing_mode)}."
+                else "Checking REDCap access and loading project details before retrying failed rows."
                 if retry_row_ids
-                else f"Checking REDCap access and loading project details {_processing_mode_runtime_phrase(processing_mode)}."
+                else "Checking REDCap access and loading project details."
             ),
             rate_limit_wait_until=None,
             rate_limit_per_minute=resolved_rate_limit,
@@ -2778,23 +2442,23 @@ def run_job_processing(
             retry_failed_count=retry_failed_count,
             retry_unprocessed_count=retry_unprocessed_count,
         )
-        _record_job_event(
+        record_job_event(
             db,
             job=job,
             event_type="job.processing_started",
             message=(
-                f"{_processing_mode_title(processing_mode)} retry started for remaining rows from the Jobs page."
+                "Resume started for remaining rows from the Jobs page."
                 if retry_scope == "remaining_rows"
-                else f"{_processing_mode_title(processing_mode)} retry started for failed rows from the Jobs page."
+                else "Retry started for failed rows from the Jobs page."
                 if retry_row_ids
-                else f"{_processing_mode_title(processing_mode)} job execution started from the Jobs page."
+                else "Job execution started from the Jobs page."
             ),
             status_from=previous_status,
             status_to=JobStatus.RUNNING,
         )
         db.commit()
 
-        if cancel_if_requested("Job was cancelled before background processing started."):
+        if cancel_if_requested("Job was cancelled before processing started."):
             return
 
         with redcap_rate_limit_scope(job.redcap_api_url, job.redcap_project_id), redcap_rate_limit_notifications(on_rate_limit_event):
@@ -2829,16 +2493,16 @@ def run_job_processing(
             ) or bool({str(row.get("unique_event_name") or row.get("event_name") or "").strip() for row in repeating_forms_events if row})
             record_id_field_name = _extract_record_id_field_name(metadata_rows)
 
-            _set_job_runtime_state(
+            set_job_runtime_state(
                 job,
                 mode=processing_mode,
                 phase="processing_rows",
                 latest_message=(
-                    f"Retrying remaining rows against REDCap {_processing_mode_runtime_phrase(processing_mode)}."
+                    "Resuming remaining rows against REDCap."
                     if retry_scope == "remaining_rows"
-                    else f"Retrying failed rows against REDCap {_processing_mode_runtime_phrase(processing_mode)}."
+                    else "Retrying failed rows against REDCap."
                     if retry_row_ids
-                    else f"Processing request rows against REDCap {_processing_mode_runtime_phrase(processing_mode)}."
+                    else "Processing request rows against REDCap."
                 ),
                 rate_limit_wait_until=None,
                 rate_limit_per_minute=resolved_rate_limit,
@@ -2849,11 +2513,11 @@ def run_job_processing(
             )
             db.commit()
 
-            if cancel_if_requested("Job was cancelled during background processing."):
+            if cancel_if_requested("Job was cancelled during processing."):
                 return
 
             for row in rows:
-                if cancel_if_requested("Job was cancelled during background processing."):
+                if cancel_if_requested("Job was cancelled during processing."):
                     return
                 started = perf_counter()
                 row_result = row.row_result
@@ -2875,7 +2539,7 @@ def run_job_processing(
                         raise ValueError(f"No mapping is available for {row.target_instrument}.")
 
                     repeat_context_instance = (
-                        row.repeat_instance if _row_uses_repeat_context(row, repeating_forms_events=repeating_forms_events) else None
+                        row.repeat_instance if row_uses_repeat_context(row, repeating_forms_events=repeating_forms_events) else None
                     )
                     locking_instance = row.repeat_instance if row.repeat_instance is not None else repeat_context_instance
                     status_response = fetch_locking_status(
@@ -2981,7 +2645,7 @@ def run_job_processing(
                         job.ignored_rows += 1
                     else:
                         if row.action == RowAction.LOCK:
-                            form_complete_field_name, form_complete_value, form_complete_row = _fetch_form_complete_snapshot(
+                            form_complete_field_name, form_complete_value, form_complete_row, form_complete_export_rows = fetch_form_complete_snapshot(
                                 api_url=job.redcap_api_url,
                                 api_key=cleaned_api_key,
                                 row=row,
@@ -3005,7 +2669,11 @@ def run_job_processing(
                                     else "."
                                 )
                             )
-                            if not _is_form_marked_complete(form_complete_value):
+                            processing_steps.append(
+                                "REDCap form-complete export rows inspected: "
+                                + _summarize_form_complete_export_rows(form_complete_export_rows)
+                            )
+                            if not is_form_marked_complete(form_complete_value):
                                 processing_steps.append("Skipped because the form is not marked complete.")
                                 row_result.status = RowResultStatus.IGNORED
                                 row_result.outcome_code = "form_not_complete"
@@ -3016,6 +2684,7 @@ def run_job_processing(
                                     "form_complete_field_name": form_complete_field_name,
                                     "form_complete_value": form_complete_value,
                                     "form_complete_row": form_complete_row,
+                                    "form_complete_export_rows": form_complete_export_rows,
                                     "selected_repeat_instrument": selected_repeat_instrument,
                                     "selected_repeat_instance": selected_repeat_instance,
                                     "action_called": False,
@@ -3043,6 +2712,8 @@ def run_job_processing(
                                     **status_debug_details,
                                     "form_complete_field_name": form_complete_field_name,
                                     "form_complete_value": form_complete_value,
+                                    "form_complete_row": form_complete_row,
+                                    "form_complete_export_rows": form_complete_export_rows,
                                     "query_blocking_count": unresolved_query_count or 1,
                                     "action_called": False,
                                     "shadow_fields_phase": "none",
@@ -3126,6 +2797,8 @@ def run_job_processing(
                             "status_selected_row": status_response.get("selected_row"),
                             "form_complete_field_name": form_complete_field_name if row.action == RowAction.LOCK else None,
                             "form_complete_value": form_complete_value if row.action == RowAction.LOCK else None,
+                            "form_complete_row": form_complete_row if row.action == RowAction.LOCK else None,
+                            "form_complete_export_rows": form_complete_export_rows if row.action == RowAction.LOCK else None,
                             "shadow_fields_phase": "before_lock" if row.action == RowAction.LOCK else "after_unlock",
                             "shadow_fields_payload": shadow_field_payload,
                             "action_called": True,
@@ -3140,7 +2813,7 @@ def run_job_processing(
                         else:
                             job.unlocked_rows += 1
 
-                    _record_job_event(
+                    record_job_event(
                         db,
                         job=job,
                         job_row_id=row.id,
@@ -3162,7 +2835,7 @@ def run_job_processing(
                     job.failed_rows += 1
                     if not job.last_error_summary:
                         job.last_error_summary = str(exc)
-                    _record_job_event(
+                    record_job_event(
                         db,
                         job=job,
                         job_row_id=row.id,
@@ -3186,7 +2859,7 @@ def run_job_processing(
                     job.failed_rows += 1
                     if not job.last_error_summary:
                         job.last_error_summary = row_result.message
-                    _record_job_event(
+                    record_job_event(
                         db,
                         job=job,
                         job_row_id=row.id,
@@ -3207,18 +2880,18 @@ def run_job_processing(
                     current_status = db.scalar(select(Job.status).where(Job.id == job.id)) or job.status
                     is_cancel_requested = current_status == JobStatus.CANCEL_REQUESTED
                     job.status = JobStatus.CANCEL_REQUESTED if is_cancel_requested else JobStatus.RUNNING
-                    _set_job_runtime_state(
+                    set_job_runtime_state(
                         job,
                         mode=processing_mode,
                         phase="cancelling" if is_cancel_requested else "processing_rows",
                         latest_message=(
                             "Cancellation requested. Waiting for the current step to finish before stopping this job."
                             if is_cancel_requested
-                            else f"Retried {job.processed_rows} of {len(rows)} remaining rows {_processing_mode_runtime_phrase(processing_mode)}."
+                            else f"Resumed {job.processed_rows} of {len(rows)} remaining rows."
                             if retry_scope == "remaining_rows"
-                            else f"Retried {job.processed_rows} of {len(rows)} failed rows {_processing_mode_runtime_phrase(processing_mode)}."
+                            else f"Retried {job.processed_rows} of {len(rows)} failed rows."
                             if retry_row_ids
-                            else f"Processed {job.processed_rows} of {len(rows)} rows {_processing_mode_runtime_phrase(processing_mode)}."
+                            else f"Processed {job.processed_rows} of {len(rows)} rows."
                         ),
                         rate_limit_wait_until=None,
                         rate_limit_per_minute=resolved_rate_limit,
@@ -3230,7 +2903,7 @@ def run_job_processing(
                     db.commit()
 
         final_previous_status = job.status
-        _recalculate_job_rollups(db, job=job)
+        recalculate_job_rollups(db, job=job)
         job.completed_at = utc_now()
         if job.failed_rows == job.total_rows and job.total_rows > 0:
             job.status = JobStatus.FAILED
@@ -3239,11 +2912,11 @@ def run_job_processing(
         else:
             job.status = JobStatus.COMPLETED
 
-        _set_job_runtime_state(
+        set_job_runtime_state(
             job,
             mode=processing_mode,
             phase="completed",
-            latest_message=f"{_processing_mode_title(processing_mode)} processing finished.",
+            latest_message="Processing finished.",
             rate_limit_wait_until=None,
             rate_limit_per_minute=resolved_rate_limit,
             retry_scope=retry_scope,
@@ -3251,11 +2924,11 @@ def run_job_processing(
             retry_failed_count=retry_failed_count,
             retry_unprocessed_count=retry_unprocessed_count,
         )
-        _record_job_event(
+        record_job_event(
             db,
             job=job,
             event_type="job.processing_completed",
-            message=f"{_processing_mode_title(processing_mode)} job execution finished.",
+            message="Job execution finished.",
             status_from=final_previous_status,
             status_to=job.status,
             payload_json={
@@ -3267,8 +2940,8 @@ def run_job_processing(
                 "failed_rows": job.failed_rows,
             },
         )
-        rows = _load_job_rows_for_report(db, job_id=job.id)
-        _upsert_job_report(db, job=job, rows=rows)
+        rows = load_job_rows_for_report(db, job_id=job.id)
+        upsert_job_report(db, job=job, report_bytes=_build_job_report_csv(job, rows))
         record_audit_event(
             db,
             actor_user_id=actor_user_id,
@@ -3288,25 +2961,25 @@ def run_job_processing(
         job = db.get(Job, job_id)
         if job is not None:
             previous_status = job.status
-            cancelled_count = _mark_unprocessed_rows_as_cancelled(db, job_id=job.id, reason=str(exc))
-            _recalculate_job_rollups(db, job=job)
+            cancelled_count = mark_unprocessed_rows_as_cancelled(db, job_id=job.id, reason=str(exc))
+            recalculate_job_rollups(db, job=job)
             job.status = JobStatus.FAILED
             job.completed_at = utc_now()
             job.last_error_summary = str(exc)
-            _set_job_runtime_state(
+            set_job_runtime_state(
                 job,
                 mode=processing_mode,
                 phase="failed",
                 latest_message=str(exc),
                 rate_limit_wait_until=None,
             )
-            _record_job_event(
+            record_job_event(
                 db,
                 job=job,
                 event_type="job.processing_failed",
                 level=EventLevel.ERROR,
                 message=(
-                    f"{exc} {_format_row_count(cancelled_count).capitalize()} "
+                    f"{exc} {format_row_count(cancelled_count).capitalize()} "
                     f"{'was' if cancelled_count == 1 else 'were'} left unprocessed."
                     if cancelled_count
                     else str(exc)
@@ -3314,8 +2987,8 @@ def run_job_processing(
                 status_from=previous_status,
                 status_to=JobStatus.FAILED,
             )
-            rows = _load_job_rows_for_report(db, job_id=job.id)
-            _upsert_job_report(db, job=job, rows=rows)
+            rows = load_job_rows_for_report(db, job_id=job.id)
+            upsert_job_report(db, job=job, report_bytes=_build_job_report_csv(job, rows))
             record_audit_event(
                 db,
                 actor_user_id=actor_user_id,
@@ -3352,6 +3025,11 @@ def process_job_from_ui(
     if job.status not in {JobStatus.READY, JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.COMPLETED_WITH_ERRORS}:
         return _build_jobs_redirect(error="Only ready or retryable jobs can be processed.", process_job_id=job.id)
 
+    try:
+        assert_allowed_redcap_api_url(job.redcap_api_url)
+    except ValueError as exc:
+        return _build_jobs_redirect(error=str(exc), process_job_id=job.id)
+
     cleaned_api_key = ""
     provided_api_key = bool(redcap_api_key.strip())
     if provided_api_key:
@@ -3387,32 +3065,32 @@ def process_job_from_ui(
         "unprocessed_count": 0,
         "retry_scope": "all_rows",
         "action_label": "Process",
-        "selection_copy": _format_row_count(job.total_rows or 0),
+        "selection_copy": format_row_count(job.total_rows or 0),
         "progress_summary": "rows",
     }
     is_retry_attempt = job.status in {JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.COMPLETED_WITH_ERRORS}
     if is_retry_attempt:
-        retry_rows = _get_retryable_rows(db, job_id=job.id)
+        retry_rows = get_retryable_rows(db, job_id=job.id)
         retry_row_ids = [row.id for row in retry_rows]
-        retry_summary = _summarize_retry_candidates(retry_rows)
+        retry_summary = summarize_retry_candidates(retry_rows)
         if not retry_row_ids:
             return _build_jobs_redirect(error="This job has no failed or unprocessed rows left to retry.")
     active_row_count = len(retry_row_ids) if retry_row_ids else int(job.total_rows or 0)
     launch_mode = (
-        _resolve_retry_processing_mode(job=job, row_count=active_row_count)
+        resolve_retry_processing_mode(job=job, row_count=active_row_count)
         if is_retry_attempt
-        else _resolve_processing_mode(row_count=active_row_count)
+        else resolve_processing_mode(row_count=active_row_count)
     )
-    if launch_mode == "background" and not _has_shared_redcap_api_key_cache_secret():
+    if launch_mode == "background" and not has_shared_redcap_api_key_cache_secret():
         return _build_jobs_redirect(
             error=(
-                "Background processing requires REDCAP_API_KEY_CACHE_SECRET to be configured with the same value "
-                "for the API and worker services. Update the environment and try again."
+                "Processing requires REDCAP_API_KEY_CACHE_SECRET to be configured. "
+                "Update the environment and try again."
             ),
             process_job_id=job.id,
         )
 
-    active_project_job = _find_active_project_job(db, job=job)
+    active_project_job = find_active_project_job(db, job=job)
     if active_project_job is not None:
         active_job_label = active_project_job.request_file_name or "another request"
         return _build_jobs_redirect(
@@ -3424,7 +3102,7 @@ def process_job_from_ui(
 
     resolved_rate_limit = set_redcap_rate_limit_for_scope(
         job.redcap_api_url,
-        _resolve_job_rate_limit(job),
+        resolve_job_rate_limit(job),
         job.redcap_project_id,
     )
 
@@ -3444,18 +3122,18 @@ def process_job_from_ui(
         job_label = (refreshed_job.request_file_name if refreshed_job is not None else None) or (job.request_file_name or "job")
         if refreshed_job is not None and refreshed_job.status == JobStatus.CANCELLED:
             return _build_jobs_redirect(
-                error=f"Live processing for {job_label} was cancelled before it could finish. Try again from the Jobs page.",
+                error=f"Processing for {job_label} was cancelled before it could finish. Try again from the Jobs page.",
                 process_job_id=job.id,
             )
         if refreshed_job is not None and refreshed_job.status == JobStatus.FAILED:
             return _build_jobs_redirect(
-                error=f"Live processing failed for {job_label}. Review the Jobs page for details.",
+                error=f"Processing failed for {job_label}. Review the Jobs page for details.",
                 process_job_id=job.id,
             )
         live_message = (
             f"Finished live retry for {retry_summary['selection_copy']} in {job_label}. "
             if retry_row_ids
-            else f"Finished live processing for {job_label}. "
+            else f"Finished processing for {job_label}. "
         )
         if refreshed_job is not None and refreshed_job.status == JobStatus.COMPLETED_WITH_ERRORS:
             live_message += "Some rows were blocked or failed."
@@ -3490,14 +3168,14 @@ def process_job_from_ui(
     job.blocked_rows = 0
     job.failed_rows = 0
     job.last_error_summary = None
-    _set_job_runtime_state(
+    set_job_runtime_state(
         job,
         mode="background",
         phase="queued",
         latest_message=(
-            f"Queued to retry {retry_summary['selection_copy']} in the background for this REDCap project."
+            f"Queued to resume {retry_summary['selection_copy']} for this REDCap project. Keep the app open until it finishes."
             if retry_row_ids
-            else "Queued to start in the background for this REDCap project."
+            else "Queued to start for this REDCap project. Keep the app open until processing finishes."
         ),
         rate_limit_wait_until=None,
         rate_limit_per_minute=resolved_rate_limit,
@@ -3508,14 +3186,14 @@ def process_job_from_ui(
         worker_backend="desktop",
         worker_task_id=queued_task_id,
     )
-    _record_job_event(
+    record_job_event(
         db,
         job=job,
         event_type="job.processing_queued",
         message=(
-            f"Job was queued from the Jobs page to retry {retry_summary['selection_copy']} in the background."
+            f"Job was queued from the Jobs page to resume {retry_summary['selection_copy']}."
             if retry_row_ids
-            else "Job was queued from the Jobs page for background processing."
+            else "Job was queued from the Jobs page for processing."
         ),
         status_from=previous_status,
     )
@@ -3545,26 +3223,26 @@ def process_job_from_ui(
             queued_job.blocked_rows = previous_blocked_rows
             queued_job.failed_rows = previous_failed_rows
             queued_job.options_json = previous_options_json
-            _record_job_event(
+            record_job_event(
                 db,
                 job=queued_job,
                 event_type="job.processing_queue_failed",
                 level=EventLevel.ERROR,
-                message=f"Could not queue the background worker task: {exc}",
+                message=f"Could not start processing: {exc}",
                 status_from=dispatch_failed_from,
                 status_to=previous_status,
             )
             db.commit()
-        return _build_jobs_redirect(error="Could not queue this job for background processing. Please try again.")
+        return _build_jobs_redirect(error="Could not start processing for this job. Please try again.")
     return _build_jobs_redirect(
         success=(
             (
-                f"Started background retry for {retry_summary['selection_copy']} in {job.request_file_name or 'job'}. "
+                f"Started resume for {retry_summary['selection_copy']} in {job.request_file_name or 'job'}. "
             )
             if retry_row_ids
-            else f"Started background processing for {job.request_file_name or 'job'}. "
+            else f"Started processing for {job.request_file_name or 'job'}. "
         )
-        + "Progress will appear on the Jobs page and rate-limit waits will be shown there."
+        + "Keep the app open. Progress and rate-limit waits appear on the Jobs page."
     )
 
 
@@ -3583,27 +3261,47 @@ def cancel_job_from_ui(
         return RedirectResponse("/jobs", status_code=303)
 
     if job.status == JobStatus.CANCEL_REQUESTED:
-        return _build_jobs_redirect(error="Cancellation has already been requested for this job.")
-    if job.status not in USER_CANCELLABLE_JOB_STATUSES:
+        worker_task_id = get_job_worker_task_id(job)
+        if is_job_worker_alive(worker_task_id):
+            return _build_jobs_redirect(error="Cancellation has already been requested for this job.")
+        # Orphaned cancel request: no worker is alive to finish it.
+    elif job.status not in USER_CANCELLABLE_JOB_STATUSES:
         return _build_jobs_redirect(error="Only jobs that are still awaiting action or actively processing can be cancelled.")
 
     previous_status = job.status
     job_label = job.request_file_name or "job"
-    if job.status in PRESTART_CANCELLABLE_JOB_STATUSES:
-        worker_task_id = _get_job_worker_task_id(job)
+    worker_task_id = get_job_worker_task_id(job)
+    worker_alive = is_job_worker_alive(worker_task_id)
+
+    if (
+        job.status in PRESTART_CANCELLABLE_JOB_STATUSES
+        or job.status == JobStatus.CANCEL_REQUESTED
+        or (
+            job.status in {JobStatus.RUNNING, JobStatus.WAITING_DUE_TO_RATE_LIMIT}
+            and not worker_alive
+        )
+    ):
         if worker_task_id:
             try:
                 revoke_job_processing(worker_task_id)
             except Exception:
                 pass
-        cancellation_message = "Job was cancelled before processing started."
-        _finalize_job_cancellation(
+        if previous_status in PRESTART_CANCELLABLE_JOB_STATUSES:
+            cancellation_message = "Job was cancelled before processing started."
+            row_message = "Row was not processed because the job was cancelled before execution started."
+            event_message = "Cancelled before processing started. Remaining rows were marked as not processed."
+        else:
+            cancellation_message = INTERRUPTED_JOB_MESSAGE
+            row_message = "Row was not processed because processing was interrupted before it finished."
+            event_message = "Interrupted job was closed. Remaining rows were left available to resume."
+        finalize_job_cancellation(
             db,
             job=job,
             previous_status=previous_status,
             cancellation_message=cancellation_message,
-            row_message="Row was not processed because the job was cancelled before execution started.",
-            event_message="Cancelled before processing started. Remaining rows were marked as not processed.",
+            row_message=row_message,
+            event_message=event_message,
+            build_report_csv=_build_job_report_csv,
             actor_user_id=session.user.id,
             processing_mode="background",
             request=request,
@@ -3611,24 +3309,30 @@ def cancel_job_from_ui(
         if previous_status == JobStatus.QUEUED:
             job.started_at = None
         db.commit()
-        return _build_jobs_redirect(success=f"Cancelled job for {job_label}.")
+        if previous_status in PRESTART_CANCELLABLE_JOB_STATUSES:
+            return _build_jobs_redirect(success=f"Cancelled job for {job_label}.")
+        return _build_jobs_redirect(
+            success=(
+                f"Marked {job_label} as interrupted. Use Resume Remaining Rows to continue from where it left off."
+            )
+        )
 
     job.status = JobStatus.CANCEL_REQUESTED
     job.cancellation_requested_at = utc_now()
-    _set_job_runtime_state(
+    set_job_runtime_state(
         job,
         phase="cancelling",
         latest_message="Cancellation requested. The current step will finish before this job stops.",
         rate_limit_wait_until=None,
     )
-    _record_job_event(
+    record_job_event(
         db,
         job=job,
         event_type="job.cancel_requested",
         message="Cancellation was requested from the Jobs page.",
         status_from=previous_status,
         status_to=JobStatus.CANCEL_REQUESTED,
-        payload_json={"worker_task_id": _get_job_worker_task_id(job)},
+        payload_json={"worker_task_id": get_job_worker_task_id(job)},
     )
     record_audit_event(
         db,
@@ -3888,7 +3592,7 @@ async def confirm_mappings_from_ui(
                     override_format=None if date_format_override == MAPPING_AUTO_OPTION else date_format_override,
                 )
 
-            mapping.form_complete_field_name = _expected_form_complete_field_name(instrument_name)
+            mapping.form_complete_field_name = expected_form_complete_field_name(instrument_name)
             mapping.crf_status_field_name = selected_status_field_name
             mapping.lock_date_field_name = selected_date_field_name
             mapping.status = MappingStatus.CONFIRMED
@@ -3975,11 +3679,11 @@ def download_report(report_id: UUID, request: Request, db: Session = Depends(get
     if report is None or not _can_access_job(session.user, report.job):
         return RedirectResponse("/reports", status_code=303)
 
-    rows = _load_job_rows_for_report(db, job_id=report.job_id)
+    rows = load_job_rows_for_report(db, job_id=report.job_id)
     report_bytes = _build_job_report_csv(report.job, rows)
     report.byte_size = len(report_bytes)
     report.checksum_sha256 = hashlib.sha256(report_bytes).hexdigest()
-    report.file_name = report.file_name or _build_job_report_filename(report.job)
+    report.file_name = report.file_name or build_job_report_filename(report.job)
     report.content_type = report.content_type or "text/csv"
 
     record_audit_event(

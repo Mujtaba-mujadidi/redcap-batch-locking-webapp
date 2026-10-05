@@ -35,6 +35,8 @@ hiddenimports = [
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
     "passlib.handlers.bcrypt",
+    "cryptography",
+    "cryptography.fernet",
 ]
 
 a = Analysis(

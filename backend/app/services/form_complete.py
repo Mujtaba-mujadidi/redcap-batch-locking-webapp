@@ -17,12 +17,28 @@ def expected_form_complete_field_name(instrument_name: str) -> str:
 
 
 def normalize_export_instance_token(value: object) -> str:
-    return str(value or "").strip()
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return str(int(text))
+    except ValueError:
+        return text
 
 
 def is_form_marked_complete(value: object) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) == 2
     normalized_value = str(value or "").strip().lower()
-    return normalized_value in {"2", "complete"}
+    return normalized_value in {"2", "complete", "completed"}
 
 
 def row_uses_repeat_context(
@@ -101,24 +117,28 @@ def select_exported_record_row(
 
     requested_instrument = (row.target_instrument or "").strip().lower()
     requested_instance = (
-        normalize_export_instance_token(row.repeat_instance) if row.repeat_instance is not None else ""
+        normalize_export_instance_token(row.repeat_instance) if row.repeat_instance is not None else "1"
     )
 
-    if require_repeat_match:
+    repeating_for_instrument = [
+        export_row
+        for export_row in filtered_rows
+        if str(export_row.get("redcap_repeat_instrument") or "").strip().lower() == requested_instrument
+    ]
+    # Repeating exports include a blank parent row with an empty complete status.
+    # If this instrument's instances are present, never use that parent row.
+    if require_repeat_match or repeating_for_instrument:
         if not requested_instrument or not requested_instance:
             return None
-
-        filtered_rows = [
+        matches = [
             export_row
-            for export_row in filtered_rows
-            if str(export_row.get("redcap_repeat_instrument") or "").strip().lower() == requested_instrument
-            and normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
+            for export_row in repeating_for_instrument
+            if normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
         ]
-        if len(filtered_rows) != 1:
+        if len(matches) != 1:
             return None
-        return filtered_rows[0]
+        return matches[0]
 
-    # Non-repeating forms: prefer the base/non-repeat row when identifiers are present.
     non_repeat_rows = [
         export_row
         for export_row in filtered_rows
@@ -127,17 +147,6 @@ def select_exported_record_row(
     ]
     if non_repeat_rows:
         return non_repeat_rows[0]
-
-    if requested_instance:
-        instance_matches = [
-            export_row
-            for export_row in filtered_rows
-            if normalize_export_instance_token(export_row.get("redcap_repeat_instance")) == requested_instance
-        ]
-        if len(instance_matches) == 1:
-            return instance_matches[0]
-        if instance_matches:
-            return None
 
     return filtered_rows[0] if len(filtered_rows) == 1 else None
 
@@ -150,7 +159,7 @@ def fetch_form_complete_snapshot(
     mapping: InstrumentMapping,
     record_id_field_name: str,
     repeating_forms_events: list[dict[str, object]],
-) -> tuple[str, object, dict[str, object] | None]:
+) -> tuple[str, object, dict[str, object] | None, list[dict[str, object]]]:
     form_complete_field_name = mapping.form_complete_field_name or expected_form_complete_field_name(
         row.target_instrument
     )
@@ -176,11 +185,5 @@ def fetch_form_complete_snapshot(
         require_repeat_match=require_repeat_match,
     )
     if selected_row is None:
-        if require_repeat_match:
-            raise ValueError(
-                "Could not find REDCap form-complete data for "
-                f"instrument '{row.target_instrument}' instance {row.repeat_instance} "
-                f"on record '{row.record_id}'."
-            )
-        return form_complete_field_name, None, None
-    return form_complete_field_name, selected_row.get(form_complete_field_name), selected_row
+        return form_complete_field_name, None, None, export_rows
+    return form_complete_field_name, selected_row.get(form_complete_field_name), selected_row, export_rows

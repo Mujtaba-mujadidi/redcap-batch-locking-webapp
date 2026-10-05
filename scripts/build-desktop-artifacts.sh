@@ -93,6 +93,17 @@ build_api_sidecar() {
 
   # shellcheck disable=SC1091
   source .venv/bin/activate
+
+  python - <<'PY'
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit(
+        f"Python 3.10+ is required to build the API sidecar (found {sys.version.split()[0]}). "
+        "Recreate backend/.venv with Python 3.12."
+    )
+print(f"Using Python {sys.version.split()[0]} ({__import__('platform').machine()})")
+PY
+
   python -m pip install --quiet pyinstaller
   pyinstaller redcap-api.spec --noconfirm --clean
 

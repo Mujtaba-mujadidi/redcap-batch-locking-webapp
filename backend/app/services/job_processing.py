@@ -8,12 +8,7 @@ def process_job_in_background(
     user_session_id: UUID,
     retry_row_ids: list[UUID] | None = None,
 ) -> None:
-    """Temporary service boundary for worker-driven job execution.
-
-    The legacy processing implementation still lives in the server-rendered UI module.
-    Wrapping it here keeps the worker from importing presentation code directly and
-    gives us a stable seam for a fuller extraction later.
-    """
+    """Worker entrypoint; delegates to run_job_processing in the UI router."""
 
     from app.ui.router import run_job_processing
 

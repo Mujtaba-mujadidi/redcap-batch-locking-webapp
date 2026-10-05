@@ -61,6 +61,19 @@ def redcap_rate_limit_scope(api_url: str, project_id: str | None):
         _rate_limit_scope_key_var.reset(token)
 
 
+ALLOWED_REDCAP_API_URLS = (
+    "https://stg.ovg.ox.ac.uk/COVID-19-stg/api/",
+    "https://apps.ovg.ox.ac.uk/redcap/api/",
+    "https://pms.ovg.ox.ac.uk/api/",
+    "http://localhost:8888/redcap/api/",
+)
+
+UNAUTHORIZED_REDCAP_API_URL_MESSAGE = (
+    "The REDCap API URL you entered is not approved for this app. "
+    "Please contact the Development team at the Oxford Vaccine Group if you need access."
+)
+
+
 def canonicalize_redcap_api_url(api_url: str) -> str:
     parts = urlsplit(api_url.strip())
     normalized_path = parts.path or "/"
@@ -73,6 +86,32 @@ def canonicalize_redcap_api_url(api_url: str) -> str:
             "",
         )
     )
+
+
+def _normalize_redcap_api_url_for_allowlist(api_url: str) -> str:
+    parts = urlsplit(canonicalize_redcap_api_url(api_url))
+    path = parts.path or "/"
+    if not path.endswith("/"):
+        path = f"{path}/"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")).lower()
+
+
+_ALLOWED_REDCAP_API_URL_KEYS = frozenset(
+    _normalize_redcap_api_url_for_allowlist(url) for url in ALLOWED_REDCAP_API_URLS
+)
+
+
+def is_allowed_redcap_api_url(api_url: str) -> bool:
+    return _normalize_redcap_api_url_for_allowlist(api_url) in _ALLOWED_REDCAP_API_URL_KEYS
+
+
+def assert_allowed_redcap_api_url(api_url: str) -> str:
+    canonical_url = canonicalize_redcap_api_url(api_url)
+    normalized_key = _normalize_redcap_api_url_for_allowlist(canonical_url)
+    for allowed_url in ALLOWED_REDCAP_API_URLS:
+        if _normalize_redcap_api_url_for_allowlist(allowed_url) == normalized_key:
+            return canonicalize_redcap_api_url(allowed_url)
+    raise ValueError(UNAUTHORIZED_REDCAP_API_URL_MESSAGE)
 
 
 def canonicalize_redcap_host_base_url(api_url: str) -> str:
@@ -247,7 +286,11 @@ def _raise_module_error(*, context_label: str, http_status: int, body: str, reco
 def _parse_json_response(*, context_label: str, http_status: int, body: str, record_id: str | None = None) -> Any:
     normalized_body = body.lstrip()
     if normalized_body.lower().startswith("<!doctype") or normalized_body.lower().startswith("<html"):
-        raise RedcapServiceError(f"REDCap returned HTML instead of JSON while fetching {context_label}.")
+        raise RedcapServiceError(
+            f"REDCap returned HTML instead of JSON while fetching {context_label}. "
+            "Confirm the API URL is exactly one of the approved Oxford Vaccine Group endpoints "
+            "and that the API token is valid for that project."
+        )
 
     if http_status >= 500:
         raise RedcapServiceError(f"REDCap returned a server error while fetching {context_label}.")
@@ -263,7 +306,8 @@ def _parse_json_response(*, context_label: str, http_status: int, body: str, rec
 
 
 def _post_redcap_json(api_url: str, *, context_label: str, payload: dict[str, Any]) -> Any:
-    http_status, body, _ = _perform_form_post(api_url, payload)
+    allowed_api_url = assert_allowed_redcap_api_url(api_url)
+    http_status, body, _ = _perform_form_post(allowed_api_url, payload)
     data = _parse_json_response(context_label=context_label, http_status=http_status, body=body)
 
     if http_status >= 400:
@@ -372,7 +416,8 @@ def _post_locking_module_json(
     context_label: str,
     payload: dict[str, Any],
 ) -> tuple[int, list[dict[str, Any]]]:
-    module_url = _build_locking_module_url(api_url, page)
+    allowed_api_url = assert_allowed_redcap_api_url(api_url)
+    module_url = _build_locking_module_url(allowed_api_url, page)
     http_status, body, _ = _perform_form_post(module_url, payload)
     record_id = str(payload.get("record") or "").strip() or None
     data = _parse_json_response(
@@ -423,7 +468,8 @@ def _build_locking_module_url(api_url: str, page: str) -> str:
 
 
 def probe_locking_api(api_url: str, token: str) -> dict[str, Any]:
-    probe_url = _build_locking_module_url(api_url, "status")
+    allowed_api_url = assert_allowed_redcap_api_url(api_url)
+    probe_url = _build_locking_module_url(allowed_api_url, "status")
     http_status, body, content_type = _perform_form_post(
         probe_url,
         {
@@ -460,9 +506,10 @@ def probe_locking_api(api_url: str, token: str) -> dict[str, Any]:
 
 
 def fetch_redcap_preflight_bundle(api_url: str, token: str) -> dict[str, Any]:
+    allowed_api_url = assert_allowed_redcap_api_url(api_url)
     project_info = _as_single_object(
         _post_redcap_json(
-            api_url,
+            allowed_api_url,
             context_label="project information",
             payload={
                 "token": token,
@@ -476,7 +523,7 @@ def fetch_redcap_preflight_bundle(api_url: str, token: str) -> dict[str, Any]:
 
     metadata = _as_object_list(
         _post_redcap_json(
-            api_url,
+            allowed_api_url,
             context_label="metadata",
             payload={
                 "token": token,
@@ -490,7 +537,7 @@ def fetch_redcap_preflight_bundle(api_url: str, token: str) -> dict[str, Any]:
 
     instruments = _as_object_list(
         _post_redcap_json(
-            api_url,
+            allowed_api_url,
             context_label="instrument definitions",
             payload={
                 "token": token,
@@ -505,7 +552,7 @@ def fetch_redcap_preflight_bundle(api_url: str, token: str) -> dict[str, Any]:
     try:
         repeating_forms_events = _as_object_list(
             _post_redcap_json(
-                api_url,
+                allowed_api_url,
                 context_label="repeating instrument definitions",
                 payload={
                     "token": token,
@@ -524,7 +571,7 @@ def fetch_redcap_preflight_bundle(api_url: str, token: str) -> dict[str, Any]:
 
     export_field_names = _as_object_list(
         _post_redcap_json(
-            api_url,
+            allowed_api_url,
             context_label="export field names",
             payload={
                 "token": token,
@@ -536,7 +583,7 @@ def fetch_redcap_preflight_bundle(api_url: str, token: str) -> dict[str, Any]:
         context_label="export field names",
     )
 
-    locking_api_probe = probe_locking_api(api_url, token)
+    locking_api_probe = probe_locking_api(allowed_api_url, token)
     external_modules = project_info.get("external_modules")
     locking_api_listed = "locking_api" in json.dumps(external_modules, default=str).lower()
 

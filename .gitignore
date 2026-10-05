@@ -33,7 +33,9 @@ dist/
 tmp/
 storage/
 uploads/
-reports/
+# Runtime report output only (do not ignore frontend/src/**/reports)
+/reports/
+backend/reports/
 .desktop-dev-data/
 .desktop-build-cache/
 desktop/dist/

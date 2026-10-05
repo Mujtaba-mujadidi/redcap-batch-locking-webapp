@@ -1,9 +1,9 @@
-export type ReportExportProgress = {
+export type CsvDownloadProgress = {
   stage: string;
   percent: number;
 };
 
-export type ReportExportResult =
+export type CsvDownloadResult =
   | { ok: true; fileName: string; savedPath?: string }
   | { ok: false; message: string; cancelled?: boolean };
 
@@ -47,13 +47,69 @@ async function isTauriRuntime(): Promise<boolean> {
   }
 }
 
+async function saveCsvBlob(
+  blob: Blob,
+  fileName: string,
+  dialogTitle: string,
+  onProgress?: (progress: CsvDownloadProgress) => void,
+): Promise<CsvDownloadResult> {
+  onProgress?.({ stage: "Choose where to save the file", percent: 72 });
+
+  if (await isTauriRuntime()) {
+    try {
+      const [{ save }, { writeTextFile }] = await Promise.all([
+        import("@tauri-apps/plugin-dialog"),
+        import("@tauri-apps/plugin-fs"),
+      ]);
+
+      const savePath = await save({
+        defaultPath: fileName,
+        title: dialogTitle,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+
+      if (!savePath) {
+        return { ok: false, message: "Export cancelled.", cancelled: true };
+      }
+
+      const resolvedSavePath = ensureCsvExtension(savePath);
+      onProgress?.({ stage: "Writing file", percent: 88 });
+      await writeTextFile(resolvedSavePath, await blob.text());
+      onProgress?.({ stage: "Export complete", percent: 100 });
+
+      const savedLeafName = resolvedSavePath.split(/[/\\]/).pop() || fileName;
+      return { ok: true, fileName: savedLeafName, savedPath: resolvedSavePath };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        message: detail ? `Could not save the file: ${detail}` : "Could not save the file.",
+      };
+    }
+  }
+
+  onProgress?.({ stage: "Starting download", percent: 88 });
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const downloadLink = document.createElement("a");
+  downloadLink.href = downloadUrl;
+  downloadLink.download = fileName;
+  document.body.appendChild(downloadLink);
+  downloadLink.click();
+  downloadLink.remove();
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(downloadUrl);
+  }, 1000);
+  onProgress?.({ stage: "Export complete", percent: 100 });
+  return { ok: true, fileName };
+}
+
 export async function exportReport(
   reportId: string,
   options: {
-    onProgress?: (progress: ReportExportProgress) => void;
+    onProgress?: (progress: CsvDownloadProgress) => void;
     suggestedFileName?: string;
   } = {},
-): Promise<ReportExportResult> {
+): Promise<CsvDownloadResult> {
   const { onProgress, suggestedFileName } = options;
 
   onProgress?.({ stage: "Preparing report export", percent: 12 });
@@ -64,7 +120,7 @@ export async function exportReport(
   });
 
   if (response.status === 401) {
-    return { ok: false, message: "Your session expired. Sign in again and retry the export." };
+    return { ok: false, message: "Your local session expired. Quit and reopen the app, then retry the export." };
   }
 
   if (!response.ok) {
@@ -80,57 +136,42 @@ export async function exportReport(
 
   const fileName = parseDownloadFilename(dispositionHeader) || suggestedFileName || "job-report.csv";
   const blob = await response.blob();
+  return saveCsvBlob(blob, fileName, "Save report", onProgress);
+}
 
-  onProgress?.({ stage: "Choose where to save the report", percent: 72 });
+export async function exportRequestTemplate(
+  options: {
+    onProgress?: (progress: CsvDownloadProgress) => void;
+  } = {},
+): Promise<CsvDownloadResult> {
+  const { onProgress } = options;
 
-  if (await isTauriRuntime()) {
-    try {
-      const [{ save }, { writeTextFile }] = await Promise.all([
-        import("@tauri-apps/plugin-dialog"),
-        import("@tauri-apps/plugin-fs"),
-      ]);
+  onProgress?.({ stage: "Preparing request template", percent: 20 });
 
-      const savePath = await save({
-        defaultPath: fileName,
-        title: "Save report",
-        filters: [{ name: "CSV report", extensions: ["csv"] }],
-      });
+  const response = await fetch("/api/jobs/template", {
+    method: "GET",
+    cache: "no-store",
+  });
 
-      if (!savePath) {
-        return { ok: false, message: "Export cancelled.", cancelled: true };
-      }
-
-      const resolvedSavePath = ensureCsvExtension(savePath);
-
-      onProgress?.({ stage: "Writing report file", percent: 88 });
-      await writeTextFile(resolvedSavePath, await blob.text());
-
-      onProgress?.({ stage: "Export complete", percent: 100 });
-
-      const savedLeafName = resolvedSavePath.split(/[/\\]/).pop() || fileName;
-      return { ok: true, fileName: savedLeafName, savedPath: resolvedSavePath };
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const message = detail
-        ? `Could not save the report file: ${detail}`
-        : "Could not save the report file.";
-      return { ok: false, message };
-    }
+  if (response.status === 401) {
+    return {
+      ok: false,
+      message: "Your local session expired. Quit and reopen the app, then retry the export.",
+    };
   }
 
-  onProgress?.({ stage: "Starting download", percent: 88 });
+  if (!response.ok) {
+    return { ok: false, message: `Template export failed with status ${response.status}.` };
+  }
 
-  const downloadUrl = window.URL.createObjectURL(blob);
-  const downloadLink = document.createElement("a");
-  downloadLink.href = downloadUrl;
-  downloadLink.download = fileName;
-  document.body.appendChild(downloadLink);
-  downloadLink.click();
-  downloadLink.remove();
-  window.setTimeout(() => {
-    window.URL.revokeObjectURL(downloadUrl);
-  }, 1000);
+  const dispositionHeader = response.headers.get("content-disposition") || "";
+  const fileName =
+    parseDownloadFilename(dispositionHeader) || "redcap-batch-request-template.csv";
+  const blob = await response.blob();
 
-  onProgress?.({ stage: "Export complete", percent: 100 });
-  return { ok: true, fileName };
+  // Tauri webviews often render attachment links as plain text; always use save/download helpers.
+  return saveCsvBlob(blob, fileName, "Save request template", onProgress);
 }
+
+export type ReportExportProgress = CsvDownloadProgress;
+export type ReportExportResult = CsvDownloadResult;

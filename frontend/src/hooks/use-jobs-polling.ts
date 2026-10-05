@@ -8,6 +8,11 @@ async function readJobsList(response: Response): Promise<JobsList> {
   return (await response.json()) as JobsList;
 }
 
+type RefreshOptions = {
+  /** When true, the Refresh button shows a busy state. Background polls stay silent. */
+  manual?: boolean;
+};
+
 /**
  * Poll /api/jobs while any job is active so the table stays current
  * without a full page reload.
@@ -15,17 +20,20 @@ async function readJobsList(response: Response): Promise<JobsList> {
 export function useJobsPolling(initialJobs: JobListItem[], initialHasActiveJobs: boolean) {
   const [jobs, setJobs] = useState(initialJobs);
   const [hasActiveJobsState, setHasActiveJobsState] = useState(initialHasActiveJobs);
-  const [isRefreshingJobs, setIsRefreshingJobs] = useState(false);
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
   const isRefreshingRef = useRef(false);
 
-  const refreshJobs = useCallback(async () => {
+  const refreshJobs = useCallback(async (options: RefreshOptions = {}) => {
     if (isRefreshingRef.current) {
       return false;
     }
 
+    const manual = Boolean(options.manual);
     isRefreshingRef.current = true;
-    setIsRefreshingJobs(true);
+    if (manual) {
+      setIsManualRefreshing(true);
+    }
     try {
       const response = await fetch("/api/jobs?limit=3", {
         method: "GET",
@@ -47,7 +55,9 @@ export function useJobsPolling(initialJobs: JobListItem[], initialHasActiveJobs:
       return true;
     } finally {
       isRefreshingRef.current = false;
-      setIsRefreshingJobs(false);
+      if (manual) {
+        setIsManualRefreshing(false);
+      }
     }
   }, []);
 
@@ -78,7 +88,7 @@ export function useJobsPolling(initialJobs: JobListItem[], initialHasActiveJobs:
     setJobs,
     hasActiveJobsState,
     setHasActiveJobsState,
-    isRefreshingJobs,
+    isRefreshingJobs: isManualRefreshing,
     refreshJobs,
   };
 }

@@ -11,7 +11,12 @@ import { StatusPill } from "@/components/status-pill";
 import { TableActionMenu } from "@/components/table-action-menu";
 import { useJobsPolling } from "@/hooks/use-jobs-polling";
 import { suggestedReportFileName, useReportExport } from "@/hooks/use-report-export";
+import { exportRequestTemplate } from "@/lib/report-export";
 import { formatDate } from "@/lib/format";
+import {
+  isAllowedRedcapApiUrl,
+  UNAUTHORIZED_REDCAP_API_URL_MESSAGE,
+} from "@/lib/redcap-api-url";
 import type { BackendActionResult, JobListItem, JobStatus } from "@/lib/types";
 
 type BannerState =
@@ -31,28 +36,20 @@ async function readActionResult(response: Response): Promise<BackendActionResult
   return (await response.json()) as BackendActionResult;
 }
 
-function processModeLabel(mode: string | null): string {
-  return mode === "live" ? "Live in this browser session" : "Background worker";
-}
-
-function progressModeLabel(mode: string | null): string {
-  return mode === "live" ? "Live processing" : "Background processing";
+function isUnauthorizedApiUrlMessage(message: string): boolean {
+  return message.includes("not approved for this app");
 }
 
 function isTerminalJob(status: string): boolean {
   return ["completed", "cancelled", "failed"].includes(status);
 }
 
-function shouldShowProgressMode(status: JobStatus): boolean {
+function shouldShowKeepAppOpenHint(status: JobStatus): boolean {
   return [
     "queued",
     "running",
     "waiting_due_to_rate_limit",
     "cancel_requested",
-    "cancelled",
-    "completed",
-    "completed_with_errors",
-    "failed",
   ].includes(status);
 }
 
@@ -127,10 +124,16 @@ export function JobsManager({
   const [processError, setProcessError] = useState<string | null>(null);
   const [importProgressStageIndex, setImportProgressStageIndex] = useState(0);
   const [importProgressPercent, setImportProgressPercent] = useState(12);
+  const [unauthorizedAlertOpen, setUnauthorizedAlertOpen] = useState(false);
+
+  function showUnauthorizedApiUrlAlert() {
+    setUnauthorizedAlertOpen(true);
+  }
   const handleReportExportCompleted = useCallback((message: string, tone: "success" | "error") => {
     setBanner({ message, tone });
   }, []);
   const { isExporting, progress, startExport } = useReportExport(handleReportExportCompleted);
+  const [isTemplateExporting, setIsTemplateExporting] = useState(false);
   const visibleJobs = jobs.slice(0, 3);
   const importBusy = busyKey === "import";
   const processBusy = Boolean(busyKey?.startsWith("process-"));
@@ -142,6 +145,37 @@ export function JobsManager({
   const overlayIsRetry = Boolean(
     processBusyJob?.action_label && /retry/i.test(processBusyJob.action_label),
   );
+
+  async function handleExportTemplate() {
+    if (isTemplateExporting) {
+      return;
+    }
+
+    setIsTemplateExporting(true);
+    try {
+      const result = await exportRequestTemplate();
+      if (!result.ok) {
+        if (!result.cancelled) {
+          setBanner({ tone: "error", message: result.message });
+        }
+        return;
+      }
+
+      setBanner({
+        tone: "success",
+        message: result.savedPath
+          ? `Template saved to ${result.savedPath}.`
+          : `Template downloaded as ${result.fileName}.`,
+      });
+    } catch (error) {
+      setBanner({
+        tone: "error",
+        message: error instanceof Error ? error.message : "Template export failed unexpectedly.",
+      });
+    } finally {
+      setIsTemplateExporting(false);
+    }
+  }
 
   useEffect(() => {
     setJobs(initialJobs);
@@ -263,18 +297,33 @@ export function JobsManager({
     event.preventDefault();
     setBanner(null);
 
+    // Phase 1: check the API URL locally before contacting the backend or REDCap.
+    if (!isAllowedRedcapApiUrl(importApiUrl)) {
+      setImportOpen(true);
+      setBanner({
+        tone: "error",
+        message: UNAUTHORIZED_REDCAP_API_URL_MESSAGE,
+      });
+      showUnauthorizedApiUrlAlert();
+      return;
+    }
+
     const form = event.currentTarget;
     const result = await runAction("/api/jobs/import", new FormData(form), "import");
     if (!result) {
       return;
     }
     if (!result.ok) {
+      const message = result.message || "Unable to import that request package.";
       setImportOpen(true);
       setBanner({
         tone: "error",
-        message: result.message || "Unable to import that request package.",
+        message,
       });
       setImportApiUrl(result.redirect_query.import_api_url || importApiUrl);
+      if (isUnauthorizedApiUrlMessage(message)) {
+        showUnauthorizedApiUrlAlert();
+      }
       return;
     }
 
@@ -306,7 +355,11 @@ export function JobsManager({
       return;
     }
     if (!result.ok) {
-      setProcessError(result.message || "Unable to start processing for this job.");
+      const message = result.message || "Unable to start processing for this job.";
+      setProcessError(message);
+      if (isUnauthorizedApiUrlMessage(message)) {
+        showUnauthorizedApiUrlAlert();
+      }
       return;
     }
 
@@ -359,6 +412,15 @@ export function JobsManager({
       return;
     }
 
+    if (!result.ok && isUnauthorizedApiUrlMessage(result.message || "")) {
+      showUnauthorizedApiUrlAlert();
+      setBanner({
+        tone: "error",
+        message: UNAUTHORIZED_REDCAP_API_URL_MESSAGE,
+      });
+      return;
+    }
+
     const remainingFailures = /failed|blocked/i.test(result.message || "");
     setBanner({
       tone: result.ok && !remainingFailures ? "success" : "error",
@@ -374,9 +436,16 @@ export function JobsManager({
         title="Jobs"
         actions={
           <div className="jobs-header-actions">
-            <a className="header-action" href="/api/jobs/template">
-              Export Template
-            </a>
+            <button
+              className="header-action"
+              type="button"
+              disabled={isTemplateExporting}
+              onClick={() => {
+                void handleExportTemplate();
+              }}
+            >
+              {isTemplateExporting ? "Exporting…" : "Export Template"}
+            </button>
             <button
               className="primary-button primary-button-inline"
               type="button"
@@ -404,6 +473,12 @@ export function JobsManager({
           <div className="modal-note import-request-note">
             The API key is cached for this session so repeat processing on the same REDCap host does not always require re-entry.
           </div>
+
+          {banner?.tone === "error" ? (
+            <div className="banner banner-error import-request-banner" role="alert">
+              {banner.message}
+            </div>
+          ) : null}
 
           <form
             ref={importFormRef}
@@ -467,7 +542,7 @@ export function JobsManager({
         </section>
       ) : null}
 
-      {banner ? (
+      {banner && !(importOpen && banner.tone === "error") ? (
         <div className={`banner ${banner.tone === "success" ? "banner-success" : "banner-error"}`}>
           {banner.message}
         </div>
@@ -488,16 +563,16 @@ export function JobsManager({
           <div className="banner banner-success queue-banner">
             <div className="queue-banner-content">
               <p>
-                At least one request is active right now. Status updates automatically every few seconds, or
-                click Refresh to check immediately.
+                At least one request is active. Progress updates automatically every few seconds —
+                keep the app open until it finishes.
               </p>
               <button
                 type="button"
                 className="header-action queue-banner-refresh"
-                onClick={() => void refreshJobs()}
+                onClick={() => void pollJobs({ manual: true })}
                 disabled={refreshingJobs}
               >
-                {refreshingJobs ? "Refreshing..." : "Refresh"}
+                {refreshingJobs ? "Refreshing..." : "Refresh now"}
               </button>
             </div>
           </div>
@@ -584,8 +659,8 @@ export function JobsManager({
                             {job.progress.wait_message ? (
                               <p className="compact-copy job-progress-wait">{job.progress.wait_message}</p>
                             ) : null}
-                            {shouldShowProgressMode(job.status) ? (
-                              <p className="job-progress-mode">{progressModeLabel(job.progress.mode)}</p>
+                            {shouldShowKeepAppOpenHint(job.status) ? (
+                              <p className="job-progress-mode">Keep the app open until this finishes.</p>
                             ) : null}
                           </div>
                         ) : (
@@ -751,7 +826,9 @@ export function JobsManager({
             <p className="mini-label">Process Job</p>
             <h3 id="process-job-modal-title">Start selected request</h3>
             <p className="compact-copy">
-              {processJob ? `${processJob.request_file_name || "Imported request"} · ${processModeLabel(processJob.launch_mode)}` : "Enter the REDCap API key to start execution."}
+              {processJob
+                ? `${processJob.request_file_name || "Imported request"} · Keep the app open until processing finishes.`
+                : "Enter the REDCap API key to start execution."}
             </p>
           </div>
           <button type="button" className="modal-close" aria-label="Close" onClick={closeProcessModal}>
@@ -802,12 +879,12 @@ export function JobsManager({
           <div className="import-progress-heading">
             <span className="loader-spinner" aria-hidden="true"></span>
             <div>
-              <p className="mini-label">Live Processing</p>
+              <p className="mini-label">Processing</p>
               <h4 className="progress-title">
                 {importBusy
                   ? "Running REDCap pre-flight"
                   : overlayIsRetry
-                    ? "Retrying failed rows"
+                    ? "Resuming remaining rows"
                     : "Starting request processing"}
               </h4>
             </div>
@@ -816,7 +893,7 @@ export function JobsManager({
             {importBusy
               ? "Validating the import package, checking the REDCap project, and preparing any mapping review that is needed."
               : overlayIsRetry
-                ? "Checking REDCap access and reprocessing only the rows that failed."
+                ? "Checking REDCap access and continuing only the rows that still need processing."
                 : "Checking REDCap access, loading project details, and processing request rows."}
           </p>
           <div className="progress-meter" aria-hidden="true">
@@ -829,8 +906,38 @@ export function JobsManager({
             {overlayStages[importProgressStageIndex] || "Preparing the next step..."}
           </p>
           <p className="compact-copy progress-mode-copy">
-            Mode: Live in this browser session. Keep this tab open while the request is prepared.
+            Keep the app open until this finishes.
           </p>
+        </div>
+      </div>
+
+      <div
+        className="app-alert-backdrop"
+        hidden={!unauthorizedAlertOpen}
+        onClick={() => setUnauthorizedAlertOpen(false)}
+      >
+        <div
+          className="app-alert-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="unauthorized-api-url-title"
+          aria-describedby="unauthorized-api-url-copy"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <p className="mini-label">API URL</p>
+          <h3 id="unauthorized-api-url-title">URL not approved</h3>
+          <p id="unauthorized-api-url-copy" className="app-alert-copy">
+            {UNAUTHORIZED_REDCAP_API_URL_MESSAGE}
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="primary-button primary-button-inline"
+              onClick={() => setUnauthorizedAlertOpen(false)}
+            >
+              OK
+            </button>
+          </div>
         </div>
       </div>
     </>

@@ -326,15 +326,23 @@ def summarize_job_progress(job: Job) -> dict[str, object]:
         if wait_seconds_remaining > 0:
             wait_message = f"Rate limit reached. Resuming in about {wait_seconds_remaining} seconds."
 
-    if not latest_message:
+    lowered = latest_message.lower()
+    if (
+        not latest_message
+        or "background" in lowered
+        or "browser session" in lowered
+    ):
         if job.status == JobStatus.QUEUED:
-            latest_message = "Queued for background processing."
+            latest_message = "Queued to start. Keep the app open until processing finishes."
         elif job.status == JobStatus.RUNNING:
-            latest_message = "Processing rows now."
+            latest_message = "Processing rows. Keep the app open until this finishes."
         elif job.status == JobStatus.CANCEL_REQUESTED:
             latest_message = "Cancellation requested. Waiting for the current step to finish."
         elif job.status == JobStatus.WAITING_DUE_TO_RATE_LIMIT:
             latest_message = "Paused because the REDCap API rate limit was reached."
+        else:
+            latest_message = latest_message.replace("in the background", "").replace("live in this browser session", "")
+            latest_message = " ".join(latest_message.split()).strip()
 
     summary_copy = f"{processed_rows} of {total_rows} rows processed" if total_rows else "No rows queued"
     detail_parts = []

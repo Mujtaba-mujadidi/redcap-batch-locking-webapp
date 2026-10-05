@@ -118,7 +118,7 @@
 
               <p id="import-request-progress-stage" class="progress-stage-copy">Preparing the next step...</p>
               <p id="import-request-progress-mode-copy" class="compact-copy progress-mode-copy">
-                Mode: Live in this browser session. Keep this tab open until the request finishes.
+                Keep the app open until this finishes.
               </p>
             </div>
 
@@ -353,7 +353,7 @@
         data-progress-stages="Checking REDCap access|Loading project details|Processing request rows|Finalising results"
       >
         <div class="modal-note">
-          The API key is stored as an encrypted, session-scoped cache for a short time so you do not need to re-enter it on every step. Small jobs are processed live in this browser session, while larger jobs continue in the background and show progress on the Jobs page.
+          The API key is stored as an encrypted, session-scoped cache for a short time so you do not need to re-enter it on every step. Keep the app open until processing finishes; progress is shown on the Jobs page.
         </div>
 
         <label class="field">
@@ -396,7 +396,7 @@
 
       <p id="submission-progress-stage" class="progress-stage-copy">Preparing the next step...</p>
       <p id="submission-progress-mode-copy" class="compact-copy progress-mode-copy">
-        Mode: Live in this browser session. Background workers are not enabled yet.
+        Keep the app open until this finishes.
       </p>
     </div>
   </div>
@@ -484,21 +484,15 @@
     }
 
     function configureProcessProgress(mode, jobLabel) {
-      const resolvedMode = mode === "background" ? "background" : "live";
       if (!processJobForm) {
         return;
       }
-      processJobForm.dataset.progressMode = resolvedMode;
-      processJobForm.dataset.progressTitle =
-        resolvedMode === "background" ? "Starting background processing" : "Processing request live";
+      processJobForm.dataset.progressMode = "processing";
+      processJobForm.dataset.progressTitle = "Starting request processing";
       processJobForm.dataset.progressCopy =
-        resolvedMode === "background"
-          ? "Checking REDCap access, preparing the queue, and refreshing the Jobs page once the request is started."
-          : "Checking REDCap access and processing this request live in this browser session.";
+        "Checking REDCap access and processing this request. Keep the app open until it finishes.";
       processJobForm.dataset.progressStages =
-        resolvedMode === "background"
-          ? "Checking REDCap access|Loading project details|Queueing background work|Refreshing the Jobs page"
-          : "Checking REDCap access|Loading project details|Processing request rows|Finalising results";
+        "Checking REDCap access|Loading project details|Processing request rows|Finalising results";
       processJobCopy.textContent = jobLabel || "Enter the REDCap API key to start execution.";
     }
 
@@ -532,16 +526,9 @@
     });
 
     function getProgressModeConfig(mode) {
-      if (mode === "background") {
-        return {
-          label: "Background Processing",
-          copy: "Mode: Background. You can leave this page and return to Jobs to pick up the result.",
-        };
-      }
-
       return {
-        label: "Live Processing",
-        copy: "Mode: Live in this browser session. Keep this tab open until the request finishes.",
+        label: "Processing",
+        copy: "Keep the app open until this finishes.",
       };
     }
 

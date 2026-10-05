@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.services.desktop_worker import enqueue_desktop_job_processing, revoke_desktop_job_processing
+from app.services.desktop_worker import (
+    enqueue_desktop_job_processing,
+    is_desktop_job_worker_alive,
+    revoke_desktop_job_processing,
+)
 
 
 def enqueue_job_processing(
@@ -24,3 +28,7 @@ def enqueue_job_processing(
 
 def revoke_job_processing(task_id: str) -> None:
     revoke_desktop_job_processing(task_id)
+
+
+def is_job_worker_alive(task_id: str | None) -> bool:
+    return is_desktop_job_worker_alive(task_id)
